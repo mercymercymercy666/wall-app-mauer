@@ -1,16 +1,66 @@
-# React + Vite
+# Memorial Wall Generator
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A parametric brick wall generator for memorial wall design, built with React and Vite.
 
-Currently, two official plugins are available:
+**Live app:** https://mercymercymercy666.github.io/wall-app-mauer/
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## What it does
 
-## React Compiler
+Generate and visualize a customizable memorial brick wall with:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Front wall view** — running bond brick layout with optional bush-hammer texture overlay
+- **Back wall view** — inscription/tag layout on back face of bricks
+- **Construction section drawing** — cavalier oblique detail of wall section showing brick coursing and bush-hammer finish
+- **Axonometric view** — 3D oblique projection with per-brick randomized protrusion depth, adjustable via slider
+- **PDF export** — high-resolution download of all views
 
-## Expanding the ESLint configuration
+## Parameters
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+| Parameter | Description |
+|---|---|
+| Wall width / height | Overall wall dimensions in mm |
+| Brick dimensions | Length, height, depth in mm |
+| Mortar joint | Joint thickness in mm |
+| Bush-hammer finish | None / horizontal / vertical / diagonal / cross |
+| Protrusion | Max protrusion depth for axonometric view (mm) |
+| Seed | Random seed — controls brick colors and protrusion randomization |
+
+## Tech stack
+
+- React 19 + Vite 7
+- All drawings generated as inline SVG (no canvas, no external SVG files)
+- `tinycolor2` for brick color variation
+- `jsPDF` + `html2canvas` for PDF export
+- `mulberry32` seeded RNG for reproducible layouts
+- Deployed via `gh-pages` to GitHub Pages
+
+## Local development
+
+```bash
+npm install
+npm run dev
+```
+
+## Deploy
+
+```bash
+npm run deploy
+```
+
+Builds the app and pushes `dist/` to the `gh-pages` branch. GitHub Pages serves from that branch at the URL above.
+
+## Project structure
+
+```
+wall-app/
+  src/
+    App.jsx       # All application logic and SVG generation
+    App.css       # Styles
+    main.jsx      # React entry point
+  vite.config.js  # Vite config (base: '/wall-app-mauer/' for GitHub Pages)
+  package.json
+```
+
+---
+
+Built by Merve Akdogan — MIT
