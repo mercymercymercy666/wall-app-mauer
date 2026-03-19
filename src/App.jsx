@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useRef, useEffect } from "react";
 import Papa from "papaparse";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
@@ -80,15 +80,21 @@ function toCsv(rows) {
 function normalizeVictimRows(rawRows) {
   return (rawRows || [])
     .map(r => ({
-      site:       (r["Killing Site"] ?? r["KillingSite"] ?? r["site"]        ?? "").toString().trim(),
-      last:       (r["Last Name"]    ?? r["LastName"]    ?? r["nachname"]     ?? "").toString().trim(),
-      first:      (r["First Name"]   ?? r["FirstName"]   ?? r["vorname"]      ?? "").toString().trim(),
+      site:       (r["Killing Site"] ?? r["KillingSite"] ?? r["Sterbeort"]    ?? r["site"]        ?? "").toString().trim(),
+      last:       (r["Last Name"]    ?? r["LastName"]    ?? r["Nachname"]     ?? r["nachname"]     ?? "").toString().trim(),
+      first:      (r["First Name"]   ?? r["FirstName"]   ?? r["Vorname"]      ?? r["vorname"]      ?? "").toString().trim(),
       birthYear:  (r["Birth Year"]   ?? r["Geburtsjahr"] ?? r["birth_year"]   ?? "").toString().trim(),
       birthPlace: (r["Birthplace"]   ?? r["Geburtsort"]  ?? r["birth_place"]  ?? "").toString().trim(),
       residence:  (r["Residence"]    ?? r["Wohnort"]     ?? r["residence"]    ?? "").toString().trim(),
       deathYear:  (r["Death Year"]   ?? r["Sterbejahr"]  ?? r["death_year"]   ?? "").toString().trim(),
     }))
-    .filter(r => r.site.length >= 3 && r.last.length >= 2 && r.first.length >= 2);
+    .filter(r => {
+      if (r.site.length < 3 || r.last.length < 2 || r.first.length < 2) return false;
+      const hasProperName = /^[a-zA-ZÀ-žÖöÄäÜü]/.test(r.last);
+      if (hasProperName) return true;
+      // Placeholder name (e.g. "(Unbekannt)") — keep only if other data exists
+      return !!(r.birthYear || r.birthPlace || r.residence || r.deathYear);
+    });
 }
 
 function countBySite(rows) {
@@ -144,8 +150,10 @@ function railHeights(bandMinMm, bandMaxMm, tagH, numRailsOverride) {
   const num   = numRailsOverride > 0
     ? clamp(numRailsOverride, 1, 12)
     : Math.max(3, Math.min(6, Math.floor(bandH / tagH)));
+  // Rail = actual channel/hole height in wall. Tag hangs below: top=rail, bottom=rail-tagH.
+  // Range: lowest rail at bandMinMm+tagH, highest rail at bandMaxMm.
   return Array.from({ length: num }, (_, i) =>
-    bandMinMm + (i / Math.max(1, num - 1)) * Math.max(0, bandH - tagH)
+    (bandMinMm + tagH) + (i / Math.max(1, num - 1)) * Math.max(0, bandH - tagH)
   );
 }
 
@@ -159,8 +167,6 @@ function makeTagLayout(namesSorted, wall, p) {
   const tagH      = Number(p.tagHmm);
   const bandMinMm = Number(p.tagBandMinM) * 1000;
   const bandMaxMm = Number(p.tagBandMaxM) * 1000;
-  const bandH     = bandMaxMm - bandMinMm;
-  const yJitter   = Number(p.yJitter ?? 0.28);
   const minGap    = tagW * Number(p.minGapMult ?? 1.0);
   const mode      = p.mode ?? (p.linear === false ? "free" : "linear");
 
@@ -169,7 +175,35 @@ function makeTagLayout(namesSorted, wall, p) {
   const rails    = railHeights(bandMinMm, bandMaxMm, tagH, railCountOverride);
   const numRails = rails.length;
 
-  // Poisson-disk X: n items, min gap between starts = minGap
+  // tagBottom(r): hole center sits on rail, tag extends holeFromTop above and (tagH-holeFromTop) below
+  const holeFromTop = tagH * (9 / 120);
+  const tagBottom = (r) => rails[r] - tagH + holeFromTop;
+
+  // ── GRID mode ──
+  if (mode === "grid") {
+    const cols = Math.max(1, Math.floor(wallMm / minGap));
+    return namesSorted.map((name, i) => {
+      const col = i % cols;
+      const r   = Math.floor(i / cols) % numRails;
+      return { index: i, name, xMm: +((col + 0.5) * (wallMm / cols)).toFixed(1), yMm: +tagBottom(r).toFixed(1), wMm: tagW, hMm: tagH };
+    });
+  }
+
+  // Assign each tag to a rail index first (needed for per-rail Poisson)
+  const railOf = namesSorted.map((_, i) => {
+    if (mode === "free")   return Math.floor(rng() * numRails);
+    if (mode === "linear") return i % numRails;
+    // zigzag
+    const cycle = Math.max(1, 2 * (numRails - 1));
+    const pos   = i % cycle;
+    return pos < numRails ? pos : cycle - pos;
+  });
+
+  // Group tag indices by rail, preserving alphabetical order within each rail
+  const railGroups = Array.from({ length: numRails }, () => []);
+  namesSorted.forEach((_, i) => railGroups[railOf[i]].push(i));
+
+  // Per-rail Poisson-disk X: minGap is the actual minimum start-to-start gap per rail
   function poissonX(nR) {
     const slack = wallMm - nR * minGap;
     if (slack <= 0) return Array.from({ length: nR }, (_, k) => k * wallMm / nR);
@@ -177,75 +211,35 @@ function makeTagLayout(namesSorted, wall, p) {
     return samples.map((v, k) => v + k * minGap);
   }
 
-  // All modes share one sorted X array — alphabet always tracks left→right as you walk.
-  // Flush: shift so first tag starts at x=0. Ragged: random margin.
-  function makeXAll() {
-    const xPos = poissonX(n);
+  // Build result: generate X independently per rail so minGap is truly per-rail
+  const xOf = new Array(n);
+  for (let r = 0; r < numRails; r++) {
+    const group = railGroups[r];
+    if (!group.length) continue;
+    const xs = poissonX(group.length);
+    let finalXs;
     if (linearEdges) {
-      const shift = xPos[0];
-      return xPos.map(x => x - shift);
+      // Flush: scale so first tag = 0 AND last tag end = wallMm (full wall coverage)
+      const lo = xs[0], hi = xs[xs.length - 1];
+      const span = hi - lo || 1;
+      const scale = (wallMm - tagW) / span;
+      finalXs = xs.map(x => (x - lo) * scale);
+    } else {
+      // Ragged: each rail gets a distinct random left margin (1–3 tag widths)
+      // so rails visibly start and end at different positions
+      const leftMargin = tagW * (0.5 + rng() * 2.5);
+      const first = xs[0];
+      finalXs = xs.map(x => x - first + leftMargin);
     }
-    return xPos;
+    group.forEach((globalIdx, k) => { xOf[globalIdx] = finalXs[k]; });
   }
 
-  const xAll = makeXAll();
-  const railSlotH = numRails > 1 ? bandH / numRails : bandH;
-
-  // ── GRID mode: strict columns × rows, A→Z left-to-right then down ──
-  if (mode === "grid") {
-    const cols = Math.max(1, Math.floor(wallMm / minGap));
-    const rows = Math.ceil(n / cols);
-    const colW = wallMm / cols;
-    const rowH = rows > 1 ? Math.max(0, bandH - tagH) / (rows - 1) : 0;
-    return namesSorted.map((name, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      return {
-        index: i, name,
-        xMm: +(col * colW + (rng() - 0.5) * colW * 0.15 * yJitter).toFixed(1),
-        yMm: +clamp(bandMinMm + row * rowH + (rng() - 0.5) * rowH * 0.15 * yJitter, bandMinMm, bandMaxMm - tagH).toFixed(1),
-        wMm: tagW, hMm: tagH,
-      };
-    });
-  }
-
-  // ── FREE mode: X = alphabetical, Y = random in band ──
-  // Walking left→right: letters always advance. Height is purely decorative.
-  if (mode === "free") {
-    return namesSorted.map((name, i) => ({
-      index: i, name,
-      xMm: +xAll[i].toFixed(1),
-      yMm: +(bandMinMm + rng() * Math.max(0, bandH - tagH)).toFixed(1),
-      wMm: tagW, hMm: tagH,
-    }));
-  }
-
-  // ── LINEAR mode: X = alphabetical, Y cycles through rails (0,1,2,0,1,2…) ──
-  // Standing at any X position you see consecutive names at different heights.
-  if (mode === "linear") {
-    return namesSorted.map((name, i) => {
-      const r   = i % numRails;
-      const yMm = clamp(
-        rails[r] + (rng() - 0.5) * railSlotH * yJitter * 2,
-        bandMinMm, bandMaxMm - tagH
-      );
-      return { index: i, name, xMm: +xAll[i].toFixed(1), yMm: +yMm.toFixed(1), wMm: tagW, hMm: tagH };
-    });
-  }
-
-  // ── ZIGZAG mode: X = alphabetical, Y bounces bottom↔top (ping-pong wave) ──
-  // Creates a visible wave silhouette as you walk along the wall.
-  // Pattern: 0,1,2,…,max,max-1,…,0,0,1,… (smooth bounce)
-  return namesSorted.map((name, i) => {
-    const cycle = Math.max(1, 2 * (numRails - 1));
-    const pos   = i % cycle;
-    const r     = pos < numRails ? pos : cycle - pos;
-    const yMm   = clamp(
-      rails[r] + (rng() - 0.5) * railSlotH * yJitter * 2,
-      bandMinMm, bandMaxMm - tagH
-    );
-    return { index: i, name, xMm: +xAll[i].toFixed(1), yMm: +yMm.toFixed(1), wMm: tagW, hMm: tagH };
-  });
+  return namesSorted.map((name, i) => ({
+    index: i, name,
+    xMm: +xOf[i].toFixed(1),
+    yMm: +tagBottom(railOf[i]).toFixed(1),
+    wMm: tagW, hMm: tagH,
+  }));
 }
 
 /* -----------------------
@@ -444,7 +438,7 @@ function bushHammerDiagramSvg(type) {
 /* -----------------------
    SVG previews
 ------------------------ */
-function backWallPreviewSvg(brickGrid, tagLayout) {
+function backWallPreviewSvg(brickGrid, tagLayout, rHeightsMm = []) {
   const { wallWmm, wallHmm, bricks } = brickGrid;
   const S      = PREVIEW_SCALE;
   const viewW  = Math.round(wallWmm * S);
@@ -459,6 +453,13 @@ function backWallPreviewSvg(brickGrid, tagLayout) {
       + `fill="${b.color}"/>`;
   }
 
+  // Rails drawn before tags so they appear behind (tags are semi-transparent)
+  for (let r = 0; r < rHeightsMm.length; r++) {
+    const ry = (viewH - rHeightsMm[r] * S).toFixed(1);
+    svg += `<line x1="0" y1="${ry}" x2="${viewW}" y2="${ry}" stroke="#b0a090" stroke-width="1.2" stroke-opacity="0.85"/>`;
+    svg += `<text x="4" y="${+ry - 1.5}" font-family="monospace" font-size="5" fill="#b0a090cc">R${r+1}</text>`;
+  }
+
   for (const t of tagLayout) {
     const x  = t.xMm * S;
     const y  = (wallHmm - t.yMm - t.hMm) * S;
@@ -468,7 +469,7 @@ function backWallPreviewSvg(brickGrid, tagLayout) {
     const cy = (y + h / 2).toFixed(2);
     const fs = Math.max(1.5, w * 0.42).toFixed(1);
     svg += `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" `
-      + `fill="rgba(230,235,240,0.92)" stroke="rgba(50,65,75,0.80)" stroke-width="0.3" `
+      + `fill="rgba(230,235,240,0.65)" stroke="rgba(50,65,75,0.80)" stroke-width="0.3" `
       + `data-tag-idx="${t.index}" style="cursor:pointer"/>`;
     svg += `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="middle" `
       + `font-family="monospace" font-size="${fs}" fill="rgba(5,15,25,0.85)" style="pointer-events:none">${t.index + 1}</text>`;
@@ -650,12 +651,14 @@ function wallAxonometricSvg(brickGrid, bushHammer = "none", protrusionMm = 380, 
 /* -----------------------
    Construction drawing SVG — 1:100 technical elevation
 ------------------------ */
-function constructionDrawingSvg(backWall, frontWall, p) {
+function constructionDrawingSvg(backWall, frontWall, p, tagLayout = []) {
   const SC = 10, margin = 45, wallGap = 35;
   const bW = backWall.lengthM  * SC, bH = backWall.heightM  * SC;
   const fW = frontWall.lengthM * SC, fH = frontWall.heightM * SC;
-  const totalW = Math.max(bW, fW) + 2 * margin + 130; // extra room for rail annotations + detail
-  const totalH = 22 + bH + wallGap + fH + 2 * margin;
+  const detailH = 100;
+  const optionsH = 100;
+  const totalW = Math.max(bW, fW) + 2 * margin + 150;
+  const totalH = 22 + bH + wallGap + fH + 2 * margin + detailH + optionsH + 15;
   const displayW = 1800;
   const displayH = Math.round(totalH * displayW / totalW);
 
@@ -663,6 +666,12 @@ function constructionDrawingSvg(backWall, frontWall, p) {
   const fX0 = margin, fY0 = bY0 + bH + wallGap + 12;
   const bandTopY = bH - Number(p.tagBandMaxM) * SC;
   const bandBotY = bH - Number(p.tagBandMinM) * SC;
+  const tagHmm = Number(p.tagHmm) || 120;
+  const tagWmm = Number(p.tagWmm) || 60;
+  const rHeights = railHeights(
+    Number(p.tagBandMinM) * 1000, Number(p.tagBandMaxM) * 1000, tagHmm, Number(p.railCountOverride) || 0
+  );
+  const nBS = Math.ceil(backWall.lengthM / 5);
 
   const defs = `<defs>
     <marker id="arr"  markerWidth="5" markerHeight="5" refX="5" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" fill="#ccc"/></marker>
@@ -692,78 +701,521 @@ function constructionDrawingSvg(backWall, frontWall, p) {
 
   let svg = `<rect x="0" y="0" width="${totalW}" height="${totalH}" fill="#0e0e0e"/>`;
   svg += `<text x="${totalW/2}" y="9" text-anchor="middle" font-family="monospace" font-size="5" font-weight="bold" fill="#39ff14">MEMORIAL WALL — CONSTRUCTION DRAWING  1:100</text>`;
-  svg += `<text x="${totalW/2}" y="16" text-anchor="middle" font-family="monospace" font-size="3" fill="#39ff1488">Back ${backWall.lengthM}×${backWall.heightM}m  ·  Front ${frontWall.lengthM}×${frontWall.heightM}m  ·  Tag band ${Number(p.tagBandMinM).toFixed(2)}–${Number(p.tagBandMaxM).toFixed(2)}m</text>`;
+  svg += `<text x="${totalW/2}" y="16" text-anchor="middle" font-family="monospace" font-size="3" fill="#39ff1488">Back ${backWall.lengthM}×${backWall.heightM}m  ·  Front ${frontWall.lengthM}×${frontWall.heightM}m  ·  Tag band ${Number(p.tagBandMinM).toFixed(2)}–${Number(p.tagBandMaxM).toFixed(2)}m  ·  ${rHeights.length} rails  ·  ${tagLayout.length} tags</text>`;
 
-  // Back wall
+  // ── BACK WALL ──
   svg += `<rect x="${bX0}" y="${bY0}" width="${bW}" height="${bH}" fill="#1a1a1a" stroke="#39ff14" stroke-width="0.6"/>`;
   svg += `<rect x="${bX0}" y="${bY0+bandTopY}" width="${bW}" height="${bandBotY-bandTopY}" fill="url(#hatch)" stroke="#2266aa" stroke-width="0.3" stroke-dasharray="2,2"/>`;
 
-  const nBS = Math.ceil(backWall.lengthM / 5);
+  // Tags on elevation (at 1:100 scale, shown as semi-transparent rects)
+  if (tagLayout.length > 0) {
+    tagLayout.forEach(t => {
+      const tWsvg = (t.wMm / 1000) * SC;
+      const tHsvg = (t.hMm / 1000) * SC;
+      const tx = (bX0 + (t.xMm / 1000) * SC).toFixed(2);
+      const ty = (bY0 + bH - (t.yMm / 1000) * SC - tHsvg).toFixed(2);
+      svg += `<rect x="${tx}" y="${ty}" width="${tWsvg.toFixed(2)}" height="${tHsvg.toFixed(2)}" fill="#aaa" fill-opacity="0.3" stroke="#ccc" stroke-width="0.06"/>`;
+    });
+  }
+
+  // Section lines + per-section tag counts
   for (let s = 0; s < nBS; s++) {
-    const x0 = bX0 + s*5*SC, x1 = bX0 + Math.min((s+1)*5, backWall.lengthM)*SC;
+    const x0 = bX0 + s * 5 * SC;
+    const x1 = bX0 + Math.min((s + 1) * 5, backWall.lengthM) * SC;
+    const secMid = (x0 + x1) / 2;
     if (s > 0) svg += `<line x1="${x0}" y1="${bY0}" x2="${x0}" y2="${bY0+bH}" stroke="#39ff1440" stroke-width="0.2" stroke-dasharray="2,3"/>`;
     svg += `<line x1="${x0}" y1="${bY0-3}" x2="${x1}" y2="${bY0-3}" stroke="#ccc" stroke-width="0.4" marker-start="url(#arrR)" marker-end="url(#arr)"/>`;
-    svg += `<text x="${(x0+x1)/2}" y="${bY0-5}" text-anchor="middle" font-family="monospace" font-size="2.5" fill="#aaa">5.00m</text>`;
+    svg += `<text x="${secMid}" y="${bY0-5}" text-anchor="middle" font-family="monospace" font-size="2.5" fill="#aaa">5.00 m</text>`;
+    // Tag count per section
+    const tagsInSec = tagLayout.filter(t => t.xMm >= s * 5000 && t.xMm < (s + 1) * 5000);
+    if (tagLayout.length > 0) {
+      svg += `<text x="${secMid}" y="${bY0+bH-1.5}" text-anchor="middle" font-family="monospace" font-size="2" fill="#39ff1480">SEC ${s+1}: ${tagsInSec.length} tags</text>`;
+    }
   }
-  svg += hDim(bX0, bY0+bH, bX0+bW, `${backWall.lengthM.toFixed(2)} m`);
-  svg += vDim(bX0+bW, bY0, bY0+bH, `${backWall.heightM.toFixed(2)} m`);
 
+  svg += hDim(bX0, bY0 + bH, bX0 + bW, `${backWall.lengthM.toFixed(2)} m`);
+  svg += vDim(bX0 + bW, bY0, bY0 + bH, `${backWall.heightM.toFixed(2)} m`);
+
+  // Band annotations (right side leader lines)
   const annX = bX0 + bW + 22;
   svg += `<line x1="${bX0+bW+1}" y1="${bY0+bandTopY}" x2="${annX}" y2="${bY0+bandTopY}" stroke="#2266aa" stroke-width="0.3" stroke-dasharray="1.5,2"/>`;
   svg += `<line x1="${bX0+bW+1}" y1="${bY0+bandBotY}" x2="${annX}" y2="${bY0+bandBotY}" stroke="#2266aa" stroke-width="0.3" stroke-dasharray="1.5,2"/>`;
   svg += `<text x="${annX+1}" y="${bY0+bandTopY-1.5}" font-family="monospace" font-size="2.5" fill="#2266aa">↑ ${Number(p.tagBandMaxM).toFixed(2)} m (tag band top)</text>`;
   svg += `<text x="${annX+1}" y="${bY0+bandBotY+4}"  font-family="monospace" font-size="2.5" fill="#2266aa">↓ ${Number(p.tagBandMinM).toFixed(2)} m (tag band base)</text>`;
 
-  // ── Rail annotations ──
-  const tagHmm  = Number(p.tagHmm) || 120;
-  const rHeights = railHeights(
-    Number(p.tagBandMinM) * 1000, Number(p.tagBandMaxM) * 1000, tagHmm, Number(p.railCountOverride) || 0
-  );
+  // Band height dimension (left of wall)
+  svg += vDim(bX0 - 12, bY0 + bandTopY, bY0 + bandBotY, `${Math.round((Number(p.tagBandMaxM) - Number(p.tagBandMinM)) * 1000)}mm`, 5);
+
+  // ── RAILS — staggered labels to avoid overlap ──
+  const railSvgYs = rHeights.map(rMm => bY0 + bH - (rMm / 1000) * SC);
+  // Spread label Y positions so they never overlap (min 5 SVG units apart)
+  const labelDisplayYs = [...railSvgYs];
+  const minLabelGap = 5;
+  for (let r = rHeights.length - 2; r >= 0; r--) {
+    if (labelDisplayYs[r] - labelDisplayYs[r + 1] < minLabelGap) {
+      labelDisplayYs[r] = labelDisplayYs[r + 1] + minLabelGap;
+    }
+  }
   for (let r = 0; r < rHeights.length; r++) {
     const rMm    = rHeights[r];
-    const rSvgY  = (bY0 + bH - (rMm / 1000) * SC).toFixed(1);
-    svg += `<line x1="${bX0}" y1="${rSvgY}" x2="${bX0+bW}" y2="${rSvgY}" stroke="#39ff1440" stroke-width="0.2" stroke-dasharray="5,5"/>`;
-    svg += `<line x1="${bX0+bW+1}" y1="${rSvgY}" x2="${annX-1}" y2="${rSvgY}" stroke="#39ff1428" stroke-width="0.15" stroke-dasharray="2,4"/>`;
-    svg += `<text x="${annX}" y="${+rSvgY+0.9}" font-family="monospace" font-size="2" fill="#39ff1480">R${r+1}  h=${Math.round(rMm)} mm</text>`;
+    const rSvgY  = railSvgYs[r];
+    const labelY = labelDisplayYs[r];
+    svg += `<line x1="${bX0}" y1="${rSvgY.toFixed(1)}" x2="${bX0+bW}" y2="${rSvgY.toFixed(1)}" stroke="#39ff1450" stroke-width="0.3" stroke-dasharray="5,5"/>`;
+    // Leader line from wall edge to annotation zone, then to staggered label position
+    svg += `<line x1="${bX0+bW+1}" y1="${rSvgY.toFixed(1)}" x2="${annX-2}" y2="${rSvgY.toFixed(1)}" stroke="#39ff1428" stroke-width="0.15" stroke-dasharray="2,4"/>`;
+    if (Math.abs(labelY - rSvgY) > 0.5) {
+      svg += `<line x1="${annX-2}" y1="${rSvgY.toFixed(1)}" x2="${annX-2}" y2="${(labelY + 0.5).toFixed(1)}" stroke="#39ff1428" stroke-width="0.15"/>`;
+    }
+    svg += `<text x="${annX}" y="${(labelY + 1).toFixed(1)}" font-family="monospace" font-size="2" fill="#39ff1480">R${r+1}  h=${Math.round(rMm)} mm</text>`;
   }
 
-  // ── Tag/Rail detail diagram (right side) ──
+  // ── DETAIL A: Tag on Rail — Section + Face views (NTS) ──
   const dX = annX + 50, dY = bY0 + 2;
-  svg += `<text x="${dX}" y="${dY-1}" font-family="monospace" font-size="2.5" font-weight="bold" fill="#aaa">DETAIL  Tag on Rail  NTS</text>`;
-  // rail rod
-  svg += `<line x1="${dX}" y1="${dY+8}" x2="${dX+22}" y2="${dY+8}" stroke="#ccc" stroke-width="1.8"/>`;
-  svg += `<text x="${dX-1}" y="${dY+7.5}" text-anchor="end" font-family="monospace" font-size="2" fill="#aaa">Rail Ø16</text>`;
-  // tag body (chamfered top corners)
-  const tw = 9, th = 18, tx = dX+6.5;
-  svg += `<path d="M ${tx+1.5},${dY+8} L ${tx+tw-1.5},${dY+8} L ${tx+tw},${dY+9.5} L ${tx+tw},${dY+8+th} L ${tx},${dY+8+th} L ${tx},${dY+9.5} Z" fill="none" stroke="#aaa" stroke-width="0.5"/>`;
-  // hole
-  svg += `<circle cx="${tx+tw/2}" cy="${dY+10.5}" r="1.3" fill="none" stroke="#aaa" stroke-width="0.45"/>`;
-  // dimension labels
-  svg += `<text x="${tx+tw/2}" y="${dY+8+th+4}" text-anchor="middle" font-family="monospace" font-size="1.8" fill="#888">${Number(p.tagWmm)}×${Number(p.tagHmm)} mm</text>`;
-  svg += `<text x="${tx+tw/2}" y="${dY+8+th+7}" text-anchor="middle" font-family="monospace" font-size="1.8" fill="#888">hole Ø10 at top</text>`;
-  // rail system note
-  svg += `<text x="${dX}" y="${dY+38}" font-family="monospace" font-size="2" fill="#666">· ${rHeights.length} horizontal rails (Ø16mm round bar)</text>`;
-  svg += `<text x="${dX}" y="${dY+42}" font-family="monospace" font-size="2" fill="#666">· Tags hang freely — plates may touch (chime)</text>`;
-  svg += `<text x="${dX}" y="${dY+46}" font-family="monospace" font-size="2" fill="#666">· Rail heights above finished floor as noted</text>`;
-  svg += `<text x="${dX}" y="${dY+50}" font-family="monospace" font-size="2" fill="#666">· Tag plate: stainless steel, brushed finish</text>`;
+  svg += `<defs><pattern id="mhatch_a" width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <line x1="0" y1="0" x2="0" y2="3" stroke="#555" stroke-width="0.7"/>
+  </pattern></defs>`;
+  svg += `<text x="${dX}" y="${dY-1}" font-family="monospace" font-size="2.5" font-weight="bold" fill="#aaa">DETAIL A  Tag + Rail in Channel  NTS</text>`;
 
-  svg += `<text x="${bX0}" y="${bY0+bH+14}" font-family="monospace" font-size="2.2" fill="#39ff1255">RAIL SYSTEM: ${rHeights.length} rods at h=${rHeights.map(h=>Math.round(h)+'mm').join(' / ')} · Tags hang via Ø10 hole · Plates may touch adjacent rails</text>`;
+  // Scale: 1 SVG unit ≈ 3.6mm
+  const Sd = 0.278;
+  const wFx  = dX + 22;
+  const chD  = +(30 * Sd).toFixed(1);  // channel depth SVG ≈ 8.3
+  const chH  = +(35 * Sd).toFixed(1);  // channel height SVG ≈ 9.7
+  const chLX = wFx - chD;
+  const chTY = dY + 10;
+  const chBY = chTY + chH;
+  const railRA  = +(8  * Sd).toFixed(2); // Ø16mm radius ≈ 2.22
+  const railCXA = (chLX + wFx) / 2;    // centered in channel depth
+  const railCYA = (chTY + chBY) / 2;
+  const holeRA  = +(10 * Sd).toFixed(2); // Ø20mm hole radius ≈ 2.78
+  const tagH_svgA = tagHmm * Sd;         // e.g. 120×0.278 = 33.4
+  const tagW_svgA = tagWmm * Sd;         // e.g.  60×0.278 = 16.7
+  const tagTopYA  = railCYA - 10 * Sd;  // hole is 10mm from top of tag
+  const tagBotYA  = tagTopYA + tagH_svgA;
+  const tagEdge   = Math.max(0.9, 3 * Sd); // 3mm plate thickness, edge-on
+
+  // ── SECTION VIEW (side: back-wall left, wall-face right) ──
+  // Masonry hatch: above channel, below channel, behind channel
+  svg += `<rect x="${dX}"   y="${(chTY-7).toFixed(1)}"  width="${(wFx-dX)}" height="7"                               fill="url(#mhatch_a)" stroke="none"/>`;
+  svg += `<rect x="${dX}"   y="${chBY.toFixed(1)}"       width="${(wFx-dX)}" height="${(tagBotYA-chBY+7).toFixed(1)}"  fill="url(#mhatch_a)" stroke="none"/>`;
+  svg += `<rect x="${dX}"   y="${chTY.toFixed(1)}"       width="${(chLX-dX).toFixed(1)}" height="${chH}"             fill="url(#mhatch_a)" stroke="none"/>`;
+  // Wall outline
+  svg += `<rect x="${dX}" y="${(chTY-7).toFixed(1)}" width="${wFx-dX}" height="${(tagBotYA-chTY+14).toFixed(1)}" fill="none" stroke="#888" stroke-width="0.5"/>`;
+  // Channel void
+  svg += `<rect x="${chLX.toFixed(1)}" y="${chTY.toFixed(1)}" width="${chD}" height="${chH}" fill="#111" stroke="none"/>`;
+  svg += `<line x1="${chLX.toFixed(1)}" y1="${chTY.toFixed(1)}" x2="${wFx}" y2="${chTY.toFixed(1)}" stroke="#ccc" stroke-width="0.7"/>`;
+  svg += `<line x1="${chLX.toFixed(1)}" y1="${chBY.toFixed(1)}" x2="${wFx}" y2="${chBY.toFixed(1)}" stroke="#ccc" stroke-width="0.7"/>`;
+  svg += `<line x1="${chLX.toFixed(1)}" y1="${chTY.toFixed(1)}" x2="${chLX.toFixed(1)}" y2="${chBY.toFixed(1)}" stroke="#ccc" stroke-width="0.5"/>`;
+  // Wall face (bold vertical line)
+  svg += `<line x1="${wFx}" y1="${(chTY-9).toFixed(1)}" x2="${wFx}" y2="${(tagBotYA+8).toFixed(1)}" stroke="#ddd" stroke-width="1.1"/>`;
+  // Rail circle (cross section of Ø16mm rod inside channel)
+  // Arm protrudes from rail through wall face into air in front
+  const armExt   = +(18 * Sd).toFixed(2);  // ~18mm arm extension in front of wall face
+  const tagFaceX = wFx + +armExt;
+
+  // Air space tint in front of wall (where tag plate hangs)
+  svg += `<rect x="${wFx.toFixed(1)}" y="${tagTopYA.toFixed(1)}" width="${armExt}" height="${tagH_svgA.toFixed(1)}" fill="#1c2535" stroke="none"/>`;
+
+  // Arm: horizontal bracket from rail (inside channel) through wall face to plate face
+  svg += `<line x1="${railCXA.toFixed(1)}" y1="${railCYA.toFixed(1)}" x2="${tagFaceX.toFixed(1)}" y2="${railCYA.toFixed(1)}" stroke="#c8d0d8" stroke-width="${tagEdge.toFixed(1)}"/>`;
+
+  // Tag plate (edge-on strip) in front of wall face, hanging from arm end
+  svg += `<rect x="${(tagFaceX - tagEdge/2).toFixed(1)}" y="${tagTopYA.toFixed(1)}" width="${tagEdge.toFixed(1)}" height="${tagH_svgA.toFixed(1)}" fill="#c8d0d8" stroke="#9aabb8" stroke-width="0.35"/>`;
+
+  // Fixed Ø20mm hole in tag — centered on rail inside channel
+  svg += `<circle cx="${railCXA.toFixed(1)}" cy="${railCYA.toFixed(1)}" r="${holeRA.toFixed(2)}" fill="#1a1a1a" stroke="#8899aa" stroke-width="0.5"/>`;
+  svg += `<circle cx="${railCXA.toFixed(1)}" cy="${railCYA.toFixed(1)}" r="${railRA}" fill="#888" stroke="#bbb" stroke-width="0.6"/>`;
+
+  // Labels
+  svg += `<text x="${wFx+1}" y="${(chTY-4).toFixed(1)}" font-family="monospace" font-size="1.8" fill="#39ff1480">wall face →</text>`;
+  svg += `<text x="${(dX+1)}" y="${(railCYA+0.7).toFixed(1)}" font-family="monospace" font-size="1.6" fill="#888">channel</text>`;
+  svg += `<text x="${(railCXA-railRA-1).toFixed(1)}" y="${(railCYA-railRA-2).toFixed(1)}" text-anchor="end" font-family="monospace" font-size="1.7" fill="#aaa">Ø16 rail</text>`;
+  svg += `<text x="${(railCXA + holeRA + 0.5).toFixed(1)}" y="${(railCYA - holeRA - 0.5).toFixed(1)}" font-family="monospace" font-size="1.4" fill="#8899aa">Ø20 hole</text>`;
+  svg += `<text x="${(tagFaceX + tagEdge/2 + 0.5).toFixed(1)}" y="${(railCYA + 2).toFixed(1)}" font-family="monospace" font-size="1.6" fill="#c8d0d8">tag</text>`;
+  svg += `<text x="${((railCXA + tagFaceX)/2).toFixed(1)}" y="${(railCYA - tagEdge/2 - 1).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.4" fill="#9aabb8">arm</text>`;
+  // Dimension — channel depth
+  svg += `<line x1="${chLX.toFixed(1)}" y1="${(chBY+5).toFixed(1)}" x2="${wFx}" y2="${(chBY+5).toFixed(1)}" stroke="#ccc" stroke-width="0.4" marker-start="url(#arrR)" marker-end="url(#arr)"/>`;
+  svg += `<text x="${((chLX+wFx)/2).toFixed(1)}" y="${(chBY+9).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.8" fill="#ddd">30mm</text>`;
+  // Dimension — channel height
+  svg += vDim(chLX - 5, chTY, chBY, `35mm`, 3);
+  // Dimension — full tag height at plate face
+  svg += vDim(tagFaceX + tagEdge + 1, tagTopYA, tagBotYA, `${tagHmm}mm`, 3);
+  svg += `<text x="${((dX+wFx)/2).toFixed(1)}" y="${(tagBotYA+12).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.7" fill="#444">SECTION  SIDE VIEW</text>`;
+
+  // ── FRONT FACE VIEW (right side) ──
+  // Y coords match section view: tagTopYA = railCYA - 10*Sd (hole is 10mm from tag top)
+  const fvX    = dX + 52;   // clear of arm + labels
+  const fvTagX = fvX + 3;
+  const fvTagY = tagTopYA;  // full tag from top — matches section view
+
+  // Wall face background
+  svg += `<rect x="${fvX}" y="${(chTY-7).toFixed(1)}" width="${(tagW_svgA+6).toFixed(1)}" height="${(tagBotYA-chTY+14).toFixed(1)}" fill="#1c1c1c" stroke="#444" stroke-width="0.4"/>`;
+
+  // Channel — drawn first (behind), shown as dashed hidden lines
+  svg += `<rect x="${fvX}" y="${chTY.toFixed(1)}" width="${(tagW_svgA+6).toFixed(1)}" height="${chH}" fill="#181818" stroke="none"/>`;
+  svg += `<line x1="${fvX}" y1="${chTY.toFixed(1)}" x2="${(fvX+tagW_svgA+6).toFixed(1)}" y2="${chTY.toFixed(1)}" stroke="#555" stroke-width="0.5" stroke-dasharray="2,2"/>`;
+  svg += `<line x1="${fvX}" y1="${chBY.toFixed(1)}" x2="${(fvX+tagW_svgA+6).toFixed(1)}" y2="${chBY.toFixed(1)}" stroke="#555" stroke-width="0.5" stroke-dasharray="2,2"/>`;
+
+  // Rail — dashed line at hole height (hidden behind wall), drawn before tag
+  const fvHoleR  = +(10 * Sd).toFixed(2);
+  const fvHoleCX = (fvTagX + tagW_svgA / 2).toFixed(1);
+  const fvHoleCY = (fvTagY + 10 * Sd).toFixed(1);
+  svg += `<line x1="${fvX}" y1="${fvHoleCY}" x2="${(fvX+tagW_svgA+6).toFixed(1)}" y2="${fvHoleCY}" stroke="#b0a090" stroke-width="0.8" stroke-dasharray="2,1.5"/>`;
+  svg += `<text x="${(fvX+tagW_svgA+7).toFixed(1)}" y="${(+fvHoleCY+0.5).toFixed(1)}" font-family="monospace" font-size="1.4" fill="#b0a090">rail</text>`;
+
+  // Tag face plate — fully opaque, drawn on top of channel and rail (tag is in front)
+  svg += `<rect x="${fvTagX.toFixed(1)}" y="${fvTagY.toFixed(1)}" width="${tagW_svgA.toFixed(1)}" height="${tagH_svgA.toFixed(1)}" fill="#c8d0d8" stroke="#9aabb8" stroke-width="0.5"/>`;
+
+  // Ø20mm hole in tag face — centered, 10mm from top
+  svg += `<circle cx="${fvHoleCX}" cy="${fvHoleCY}" r="${fvHoleR}" fill="#0e0e0e" stroke="#8899aa" stroke-width="0.5"/>`;
+
+  // Arm dot — arm is perpendicular to wall face, appears end-on as a point
+  const fvArmR = +(3 * Sd).toFixed(2);
+  svg += `<circle cx="${fvHoleCX}" cy="${fvHoleCY}" r="${fvArmR}" fill="#c8d0d8" stroke="#9aabb8" stroke-width="0.4"/>`;
+
+  // Channel label
+  svg += `<text x="${(fvX+(tagW_svgA+6)/2).toFixed(1)}" y="${(chTY-2).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.5" fill="#555">channel</text>`;
+
+  // Hole dimension callout
+  svg += hDim(+fvHoleCX - +fvHoleR, +fvTagY - 4, +fvHoleCX + +fvHoleR, `Ø20mm`, 2);
+  svg += `<text x="${fvHoleCX}" y="${(+fvTagY - 7).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.5" fill="#8899aa">hole</text>`;
+
+  // Engraved name lines in visible area below channel
+  const nameY0 = chBY + 4;
+  svg += `<line x1="${(fvTagX+2)}" y1="${nameY0.toFixed(1)}"   x2="${(fvTagX+tagW_svgA-2).toFixed(1)}" y2="${nameY0.toFixed(1)}"     stroke="#888" stroke-width="0.4"/>`;
+  svg += `<line x1="${(fvTagX+3)}" y1="${(nameY0+4).toFixed(1)}" x2="${(fvTagX+tagW_svgA-3).toFixed(1)}" y2="${(nameY0+4).toFixed(1)}" stroke="#777" stroke-width="0.3"/>`;
+  svg += `<line x1="${(fvTagX+4)}" y1="${(nameY0+8).toFixed(1)}" x2="${(fvTagX+tagW_svgA-4).toFixed(1)}" y2="${(nameY0+8).toFixed(1)}" stroke="#777" stroke-width="0.3"/>`;
+
+  // Tag dimensions
+  svg += hDim(fvTagX, fvTagY + tagH_svgA + 5, fvTagX + tagW_svgA, `${tagWmm}mm`);
+  svg += vDim(fvTagX - 6, fvTagY, fvTagY + tagH_svgA, `${tagHmm}mm`, 3);
+
+  // Labels
+  svg += `<text x="${(fvX+(tagW_svgA+6)/2).toFixed(1)}" y="${(chTY-11).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.7" fill="#444">FRONT FACE VIEW</text>`;
+  svg += `<text x="${(fvX+(tagW_svgA+6)/2).toFixed(1)}" y="${(tagBotYA+12).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.7" fill="#444">Tag face visible</text>`;
+
+  // Notes below both views
+  const aNotesY = Math.max(tagBotYA, fvTagY + tagH_svgA) + 16;
+  svg += `<text x="${dX}" y="${aNotesY}"    font-family="monospace" font-size="2" fill="#666">· ${rHeights.length} rails Ø16mm S.S. — recessed in wall channel, fully hidden from front</text>`;
+  svg += `<text x="${dX}" y="${aNotesY+5}"  font-family="monospace" font-size="2" fill="#666">· Tag Ø20mm captive hole slides onto rail — tamper-proof from public side</text>`;
+  svg += `<text x="${dX}" y="${aNotesY+10}" font-family="monospace" font-size="2" fill="#666">· Security Torx end cap: public cannot remove — maintenance slides tags off</text>`;
+  svg += `<text x="${dX}" y="${aNotesY+15}" font-family="monospace" font-size="2" fill="#666">· Brushed S.S. 316 throughout  ·  Tag: ${tagWmm}×${tagHmm}mm plate ~3mm thick</text>`;
+
+  // ── TAG DISTRIBUTION DETAIL — live from actual tagLayout ──
+  const sdX = dX, sdY = aNotesY + 22;
+  const bandMinMm2 = Number(p.tagBandMinM) * 1000;
+  const bandMaxMm2 = Number(p.tagBandMaxM) * 1000;
+  const bandRange2 = bandMaxMm2 - bandMinMm2;
+  const showMm    = Math.min(1500, backWall.lengthM * 1000);
+  const sdW       = 78;
+  // Uniform scale for both axes — tags render at correct 1:2 proportions
+  const scale2    = sdW / showMm;
+  const sdH       = Math.max(20, Math.round((bandRange2 + tagHmm * 1.5) * scale2));
+  const toSvgY2   = (yMm) => sdY + sdH - (yMm - bandMinMm2) * scale2;
+  const sliceTags = tagLayout.filter(t => t.xMm <= showMm);
+  // Y position is physically valid: rail height ± slot jitter (max ±20mm)
+
+  svg += `<text x="${sdX}" y="${sdY-2}" font-family="monospace" font-size="2" font-weight="bold" fill="#aaa">TAG LAYOUT DETAIL — first ${(showMm/1000).toFixed(1)}m</text>`;
+  svg += `<rect x="${sdX}" y="${sdY}" width="${sdW}" height="${sdH}" fill="#1a1a1a" stroke="#39ff1430" stroke-width="0.4"/>`;
+
+  // Actual rails at their real heights
+  rHeights.forEach((rMm, i) => {
+    const ry = toSvgY2(rMm).toFixed(1);
+    svg += `<line x1="${sdX}" y1="${ry}" x2="${sdX+sdW}" y2="${ry}" stroke="#39ff1438" stroke-width="0.6" stroke-dasharray="3,3"/>`;
+    svg += `<text x="${sdX+sdW+1}" y="${(+ry + 0.7).toFixed(1)}" font-family="monospace" font-size="1.6" fill="#39ff1460">R${i+1}</text>`;
+  });
+
+  // Actual tags from tagLayout — snapped to nearest rail, correct proportions
+  const tWd = tagWmm * scale2;
+  const tHd = tagHmm * scale2;
+  sliceTags.forEach(t => {
+    const tx = (sdX + t.xMm * scale2).toFixed(1);
+    // t.yMm = tag bottom; tag top = t.yMm + t.hMm = rail height → align with rail line
+    const ty = toSvgY2(t.yMm + t.hMm).toFixed(1);
+    svg += `<rect x="${tx}" y="${ty}" width="${tWd.toFixed(2)}" height="${tHd.toFixed(2)}" fill="#c8d0d8" fill-opacity="0.88" stroke="#8899aa" stroke-width="0.2"/>`;
+  });
+
+  svg += `<text x="${sdX}" y="${sdY+sdH+5}" font-family="monospace" font-size="1.8" fill="#555">All tags on rails — layout updates live.</text>`;
+
+  // Back wall summary note
+  svg += `<text x="${bX0}" y="${bY0+bH+14}" font-family="monospace" font-size="2.2" fill="#39ff1255">RAIL SYSTEM: ${rHeights.length} rods at h=${rHeights.map(h=>Math.round(h)+'mm').join(' / ')} · Ø16mm S.S. round bar recessed in wall channel · Rail fully hidden from front · see Detail below</text>`;
   svg += `<text x="${bX0}" y="${bY0+bH+20}" font-family="monospace" font-size="3.5" font-weight="bold" fill="#39ff14">BACK WALL — bricks + staggered name tags</text>`;
 
-  // Front wall
+  // ── FRONT WALL ──
   svg += `<rect x="${fX0}" y="${fY0}" width="${fW}" height="${fH}" fill="#1a1a1a" stroke="#39ff14" stroke-width="0.6"/>`;
   const nFS = Math.ceil(frontWall.lengthM / 5);
   for (let s = 0; s < nFS; s++) {
-    const x0 = fX0 + s*5*SC, x1 = fX0 + Math.min((s+1)*5, frontWall.lengthM)*SC;
+    const x0 = fX0 + s * 5 * SC, x1 = fX0 + Math.min((s + 1) * 5, frontWall.lengthM) * SC;
     if (s > 0) svg += `<line x1="${x0}" y1="${fY0}" x2="${x0}" y2="${fY0+fH}" stroke="#39ff1440" stroke-width="0.2" stroke-dasharray="2,3"/>`;
     svg += `<line x1="${x0}" y1="${fY0-3}" x2="${x1}" y2="${fY0-3}" stroke="#ccc" stroke-width="0.4" marker-start="url(#arrR)" marker-end="url(#arr)"/>`;
-    svg += `<text x="${(x0+x1)/2}" y="${fY0-5}" text-anchor="middle" font-family="monospace" font-size="2.5" fill="#aaa">5.00m</text>`;
+    svg += `<text x="${(x0+x1)/2}" y="${fY0-5}" text-anchor="middle" font-family="monospace" font-size="2.5" fill="#aaa">5.00 m</text>`;
   }
-  svg += hDim(fX0, fY0+fH, fX0+fW, `${frontWall.lengthM.toFixed(2)} m`);
-  svg += vDim(fX0+fW, fY0, fY0+fH, `${frontWall.heightM.toFixed(2)} m`);
+  svg += hDim(fX0, fY0 + fH, fX0 + fW, `${frontWall.lengthM.toFixed(2)} m`);
+  svg += vDim(fX0 + fW, fY0, fY0 + fH, `${frontWall.heightM.toFixed(2)} m`);
   svg += `<text x="${fX0}" y="${fY0+fH+20}" font-family="monospace" font-size="3.5" font-weight="bold" fill="#39ff14">FRONT WALL — bricks only</text>`;
 
-  // Scale bar
+  // ── DETAIL STRIP (below front wall) ──
+  const detY = fY0 + fH + 38;
+  svg += `<line x1="${margin-5}" y1="${detY-12}" x2="${totalW-margin+5}" y2="${detY-12}" stroke="#39ff1430" stroke-width="0.4" stroke-dasharray="3,3"/>`;
+  svg += `<text x="${margin}" y="${detY-6}" font-family="monospace" font-size="3" font-weight="bold" fill="#39ff1488">DETAILS — RAIL IN CHANNEL SYSTEM + SECTION SCHEDULE</text>`;
+
+  const csX = margin, csY = detY + 10;
+
+  // ── DETAIL: Vertical section through wall at rail height (NTS) ──
+  // Axes: horizontal = wall depth (left=back, right=front face); vertical = height
+  // Scale approx 1:8 (1 SVG unit ≈ 8mm)
+  svg += `<text x="${csX}" y="${csY-3}" font-family="monospace" font-size="2.5" font-weight="bold" fill="#aaa">DETAIL  Vertical Section at Rail  NTS</text>`;
+
+  const wFace  = csX + 22;  // wall face x — kept narrow so space in front is visible
+  const chDep  = 8;         // channel depth into wall (≈30mm at this scale)
+  const chTop  = csY + 6;   // channel top y
+  const chBot  = csY + 18;  // channel bottom y (~35mm tall)
+  const chLeft = wFace - chDep;
+  const railR  = 2.5;       // Ø16mm radius at this scale
+  const railCX = chLeft + railR + 1;
+  const railCY = (chTop + chBot) / 2;
+
+  // Wall body — diagonal masonry hatch
+  svg += `<defs><pattern id="vsec" width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <line x1="0" y1="0" x2="0" y2="3" stroke="#555" stroke-width="0.7"/>
+  </pattern></defs>`;
+  // Wall above channel
+  svg += `<rect x="${csX}" y="${csY}" width="${wFace - csX}" height="${chTop - csY}" fill="url(#vsec)" stroke="none"/>`;
+  // Wall below channel
+  svg += `<rect x="${csX}" y="${chBot}" width="${wFace - csX}" height="${csY + 70 - chBot}" fill="url(#vsec)" stroke="none"/>`;
+  // Wall behind channel (back portion)
+  svg += `<rect x="${csX}" y="${chTop}" width="${chLeft - csX}" height="${chBot - chTop}" fill="url(#vsec)" stroke="none"/>`;
+  // Outer wall outline
+  svg += `<rect x="${csX}" y="${csY}" width="${wFace - csX}" height="70" fill="none" stroke="#999" stroke-width="0.6"/>`;
+
+  // Channel void (open to front)
+  svg += `<rect x="${chLeft}" y="${chTop}" width="${chDep}" height="${chBot - chTop}" fill="#0e0e0e" stroke="none"/>`;
+  // Channel outline
+  svg += `<line x1="${chLeft}" y1="${chTop}" x2="${wFace}" y2="${chTop}" stroke="#ccc" stroke-width="0.7"/>`;
+  svg += `<line x1="${chLeft}" y1="${chBot}" x2="${wFace}" y2="${chBot}" stroke="#ccc" stroke-width="0.7"/>`;
+  svg += `<line x1="${chLeft}" y1="${chTop}" x2="${chLeft}" y2="${chBot}" stroke="#ccc" stroke-width="0.5"/>`;
+
+  // Rail (circle — cross section of round rod inside channel)
+  svg += `<circle cx="${railCX}" cy="${railCY}" r="${railR}" fill="#777" stroke="#ccc" stroke-width="0.6"/>`;
+
+  // Tags hang IN FRONT of wall face.
+  // Hole at tag-top reaches into channel to grip rail; plate hangs outside.
+  // Each tag tilts to a different forward angle → depth varies → wind sound.
+  // Tinted air-space in front of wall — makes tags clearly visible outside
+  svg += `<rect x="${wFace}" y="${csY-2}" width="55" height="74" fill="#ffffff08" stroke="none"/>`;
+
+  const tagW2  = 2.2;
+  const tagLen = 48;  // SVG ≈ 120mm tag height
+  const tagTilts = [5, 20, 35];  // steeper tilt angles so depth variation is obvious
+  const tagFills = ['#c8d0d8bb', '#c8d0d8ff', '#c8d0d877'];
+
+  // Arms of different lengths: each tag's hole sits at a slightly different depth
+  const tagArmEnds = [wFace + 1, wFace + 5, wFace + 10];
+
+  tagTilts.forEach((deg, i) => {
+    const rad     = deg * Math.PI / 180;
+    const plateX  = tagArmEnds[i];  // arm connects at hole: 10mm from tag top
+    const above   = tagLen * (10 / 120);   // 10mm portion above arm (same as Detail A)
+    const below   = tagLen * (110 / 120);  // 110mm portion below arm
+    const x1 = (plateX - Math.sin(rad) * above).toFixed(1);
+    const y1 = (railCY  - Math.cos(rad) * above).toFixed(1);
+    const x2 = (plateX + Math.sin(rad) * below).toFixed(1);
+    const y2 = (railCY  + Math.cos(rad) * below).toFixed(1);
+    // Dashed arm: rail inside channel → hole (10mm from tag top)
+    svg += `<line x1="${railCX}" y1="${railCY}" x2="${plateX}" y2="${railCY}" stroke="${tagFills[i]}" stroke-width="0.7" stroke-dasharray="1.5,1"/>`;
+    // Tag plate: mostly below arm, 10mm above — matching Detail A
+    svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${tagFills[i]}" stroke-width="${tagW2}" stroke-linecap="round"/>`;
+  });
+
+  // Rail + hole redrawn on top
+  svg += `<circle cx="${railCX}" cy="${railCY}" r="${railR}" fill="#777" stroke="#ccc" stroke-width="0.6"/>`;
+  svg += `<circle cx="${railCX}" cy="${railCY}" r="1.8" fill="#0e0e0e" stroke="#9aabb8" stroke-width="0.4"/>`;
+
+  // Depth-range annotation at tag tips (tips = arm + 110mm below)
+  const below2   = tagLen * (110 / 120);
+  const depTip1X = tagArmEnds[0] + Math.sin( 5 * Math.PI/180) * below2;
+  const depTip3X = tagArmEnds[2] + Math.sin(35 * Math.PI/180) * below2;
+  const depY     = railCY + Math.cos(20 * Math.PI/180) * below2 + 4;
+  svg += `<line x1="${depTip1X.toFixed(1)}" y1="${depY.toFixed(1)}" x2="${depTip3X.toFixed(1)}" y2="${depY.toFixed(1)}" stroke="#ccc" stroke-width="0.4" marker-start="url(#arrR)" marker-end="url(#arr)"/>`;
+  svg += `<text x="${((depTip1X+depTip3X)/2).toFixed(1)}" y="${(depY+4).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.8" fill="#ddd">depth varies</text>`;
+  svg += `<text x="${((depTip1X+depTip3X)/2).toFixed(1)}" y="${(depY+8).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.6" fill="#555">tags brush → sound</text>`;
+
+  // Wall face line
+  svg += `<line x1="${wFace}" y1="${csY-2}" x2="${wFace}" y2="${csY+72}" stroke="#ddd" stroke-width="1.2"/>`;
+
+  // Labels
+  svg += `<text x="${wFace+2}" y="${csY+3}" font-family="monospace" font-size="2" fill="#39ff1480">→ front</text>`;
+  svg += `<text x="${csX+1}" y="${csY+75}" font-family="monospace" font-size="1.8" fill="#555">← back of wall</text>`;
+
+  // Dimensions
+  svg += `<line x1="${chLeft}" y1="${chBot+6}" x2="${wFace}" y2="${chBot+6}" stroke="#ccc" stroke-width="0.4" marker-start="url(#arrR)" marker-end="url(#arr)"/>`;
+  svg += `<text x="${(chLeft+wFace)/2}" y="${chBot+11}" text-anchor="middle" font-family="monospace" font-size="2" fill="#ddd">~30mm</text>`;
+  svg += vDim(chLeft - 6, chTop, chBot, `~35mm`, 4);
+  svg += vDim(wFace + 2, railCY, railCY + tagLen, `${tagHmm}mm`, 4);
+
+  // Rail label
+  svg += `<text x="${railCX - railR - 1}" y="${railCY - railR - 1.5}" text-anchor="end" font-family="monospace" font-size="1.8" fill="#aaa">Ø16mm rail</text>`;
+
+  // Notes
+  const nY = csY + 80;
+  svg += `<text x="${csX}" y="${nY}"    font-family="monospace" font-size="2" fill="#666">· Channel ~30×35mm routed into brick face — rail Ø16mm S.S. fully hidden inside</text>`;
+  svg += `<text x="${csX}" y="${nY+5}" font-family="monospace" font-size="2" fill="#666">· Tags hang on wall surface — hole at top attaches to rail from outside (front)</text>`;
+  svg += `<text x="${csX}" y="${nY+10}" font-family="monospace" font-size="2" fill="#666">· Each tag can rest at a different forward depth — variable tilt around rail axis</text>`;
+  svg += `<text x="${csX}" y="${nY+15}" font-family="monospace" font-size="2" fill="#666">· Adjacent tags brush in wind → gentle sound effect (wind chime principle)</text>`;
+
+  // ── FRONT ELEVATION FRAGMENT ──
+  const hdX = csX + 85, hdY = csY;
+  svg += `<text x="${hdX}" y="${hdY-3}" font-family="monospace" font-size="2.5" font-weight="bold" fill="#aaa">FRONT ELEVATION (fragment)</text>`;
+  // Wall background
+  svg += `<rect x="${hdX}" y="${hdY}" width="48" height="70" fill="#1c1c1c" stroke="#39ff1430" stroke-width="0.4"/>`;
+  // Render actual tag layout — first 1500mm fragment scaled to panel
+  const fvFragMm  = 1500;
+  const fvWallHmm = backWall.heightM * 1000;
+  const fvSX = 48 / fvFragMm;
+  const fvSY = 70 / fvWallHmm;
+  // Rail lines (hidden in channel — dashed)
+  for (const rh of rHeights) {
+    const ry = (hdY + (fvWallHmm - rh) * fvSY).toFixed(1);
+    svg += `<line x1="${hdX}" y1="${ry}" x2="${hdX+48}" y2="${ry}" stroke="#444" stroke-width="0.5" stroke-dasharray="2,2"/>`;
+  }
+  // Actual tags from layout (first 1500mm)
+  for (const t of tagLayout) {
+    if (t.xMm > fvFragMm) continue;
+    const tx = (hdX + t.xMm * fvSX).toFixed(1);
+    const ty = (hdY + (fvWallHmm - t.yMm - t.hMm) * fvSY).toFixed(1);
+    const tw = Math.max(0.5, (t.wMm * fvSX).toFixed(2));
+    const th = Math.max(0.8, (t.hMm * fvSY).toFixed(2));
+    svg += `<rect x="${tx}" y="${ty}" width="${tw}" height="${th}" fill="#c8d0d8" fill-opacity="0.9" stroke="#8899aa" stroke-width="0.2"/>`;
+  }
+  svg += `<text x="${hdX+24}" y="${hdY+76}" text-anchor="middle" font-family="monospace" font-size="2" fill="#555">first 1.5 m — actual layout</text>`;
+  svg += `<text x="${hdX+24}" y="${hdY+81}" text-anchor="middle" font-family="monospace" font-size="2" fill="#555">Rail hidden in channel · only tag face visible</text>`;
+
+  // ── SECTION SCHEDULE ──
+  const tableX = hdX + 62, tableY = csY;
+  svg += `<text x="${tableX}" y="${tableY-3}" font-family="monospace" font-size="2.5" font-weight="bold" fill="#aaa">SECTION SCHEDULE</text>`;
+  const tCols = [0, 20, 42, 60];
+  const headers = ["SEC", "RANGE", "TAGS", "TAGS/RAIL"];
+  headers.forEach((h, i) => {
+    svg += `<text x="${tableX+tCols[i]+1}" y="${tableY+7}" font-family="monospace" font-size="2" font-weight="bold" fill="#39ff14">${h}</text>`;
+  });
+  svg += `<line x1="${tableX}" y1="${tableY+9}" x2="${tableX+tCols[3]+22}" y2="${tableY+9}" stroke="#39ff1460" stroke-width="0.4"/>`;
+
+  const rowHt = 6.5;
+  for (let s = 0; s < nBS; s++) {
+    const rowY = tableY + 9 + (s + 1) * rowHt;
+    const tagsIn = tagLayout.filter(t => t.xMm >= s * 5000 && t.xMm < (s + 1) * 5000);
+    const tagsPerRail = rHeights.length > 0 ? Math.round(tagsIn.length / rHeights.length) : "—";
+    if (s % 2 === 0) svg += `<rect x="${tableX}" y="${rowY-4.5}" width="${tCols[3]+22}" height="${rowHt}" fill="#ffffff08"/>`;
+    [`${s+1}`, `${s*5}–${Math.min((s+1)*5,backWall.lengthM).toFixed(0)}m`, `${tagsIn.length}`, `~${tagsPerRail}`].forEach((d, i) => {
+      svg += `<text x="${tableX+tCols[i]+1}" y="${rowY}" font-family="monospace" font-size="2" fill="#ddd">${d}</text>`;
+    });
+  }
+  const totY = tableY + 9 + (nBS + 1) * rowHt;
+  svg += `<line x1="${tableX}" y1="${totY-4}" x2="${tableX+tCols[3]+22}" y2="${totY-4}" stroke="#39ff1450" stroke-width="0.3"/>`;
+  [`TOTAL`, `${backWall.lengthM.toFixed(0)} m`, `${tagLayout.length}`, `~${rHeights.length > 0 ? Math.round(tagLayout.length / rHeights.length) : "—"}`].forEach((d, i) => {
+    svg += `<text x="${tableX+tCols[i]+1}" y="${totY}" font-family="monospace" font-size="2" font-weight="bold" fill="#39ff14">${d}</text>`;
+  });
+
+  // ── OPTIONS STRIP: 3 rail visibility options ──
+  const optY = fY0 + fH + detailH + 55;
+  svg += `<line x1="${margin-5}" y1="${optY-12}" x2="${totalW-margin+5}" y2="${optY-12}" stroke="#39ff1430" stroke-width="0.4" stroke-dasharray="3,3"/>`;
+  svg += `<text x="${margin}" y="${optY-8}" font-family="monospace" font-size="3" font-weight="bold" fill="#39ff1488">RAIL VISIBILITY OPTIONS</text>`;
+  svg += `<text x="${margin}" y="${optY-3}" font-family="monospace" font-size="2" fill="#39ff1450">Vertical section through wall at rail — schematic, NTS</text>`;
+
+  // Helper: draw one option panel as a SIDE VIEW (same orientation as Detail A)
+  // X = wall depth (left=inside wall, right=front face→viewer)
+  // Y = height (rail/arm at mid-height, tag hangs below)
+  const drawOption = (ox, oy, num, title, railOffsetX, armLen, channelDepth, standoffLen, noteLines) => {
+    const panW  = 92, panH = 90;
+    const wallW = 26;  // wall thickness shown in side view
+    const facX  = ox + wallW;          // wall face x position
+    const railY = oy + 32;             // rail/arm height (vertical midpoint)
+    const tagAbove = 5;                // units above arm (≈10mm)
+    const tagBelow = 22;               // units below arm (≈110mm)
+    const tagThick = 1.4;              // tag plate edge-on thickness
+    const railR = 2.2;
+
+    // Panel outline
+    svg += `<rect x="${ox}" y="${oy-2}" width="${panW}" height="${panH}" fill="#ffffff05" stroke="#39ff1420" stroke-width="0.4" rx="1"/>`;
+    svg += `<text x="${ox+panW/2}" y="${oy+5}" text-anchor="middle" font-family="monospace" font-size="2.8" font-weight="bold" fill="#39ff14">OPTION ${num}</text>`;
+    svg += `<text x="${ox+panW/2}" y="${oy+10}" text-anchor="middle" font-family="monospace" font-size="2.2" fill="#aaa">${title}</text>`;
+
+    // Wall masonry hatch
+    const hatchId = `mhatch_${num}`;
+    svg += `<defs><pattern id="${hatchId}" width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="3" stroke="#555" stroke-width="0.6"/>
+    </pattern></defs>`;
+    const wallTop = oy + 13, wallBot = oy + 60;
+    // Wall body (minus channel cutout for opt 2)
+    svg += `<rect x="${ox}" y="${wallTop}" width="${wallW}" height="${wallBot-wallTop}" fill="url(#${hatchId})" stroke="none"/>`;
+    if (channelDepth > 0) {
+      // Mask channel area with background and redraw around it
+      const chTop = railY - 5, chBot = railY + 5;
+      svg += `<rect x="${facX-channelDepth}" y="${chTop}" width="${channelDepth}" height="${chBot-chTop}" fill="#111" stroke="none"/>`;
+      svg += `<line x1="${facX-channelDepth}" y1="${chTop}" x2="${facX}" y2="${chTop}" stroke="#ccc" stroke-width="0.5"/>`;
+      svg += `<line x1="${facX-channelDepth}" y1="${chBot}" x2="${facX}" y2="${chBot}" stroke="#ccc" stroke-width="0.5"/>`;
+      svg += `<line x1="${facX-channelDepth}" y1="${chTop}" x2="${facX-channelDepth}" y2="${chBot}" stroke="#ccc" stroke-width="0.4"/>`;
+      svg += `<text x="${facX-channelDepth/2}" y="${wallBot+5}" text-anchor="middle" font-family="monospace" font-size="1.6" fill="#666">channel</text>`;
+    }
+    svg += `<rect x="${ox}" y="${wallTop}" width="${wallW}" height="${wallBot-wallTop}" fill="none" stroke="#999" stroke-width="0.6"/>`;
+    svg += `<text x="${ox+wallW/2}" y="${wallBot+5}" text-anchor="middle" font-family="monospace" font-size="1.8" fill="#555">WALL</text>`;
+
+    // Wall face line
+    svg += `<line x1="${facX}" y1="${wallTop-2}" x2="${facX}" y2="${wallBot+2}" stroke="#ddd" stroke-width="0.9"/>`;
+    svg += `<text x="${facX+1}" y="${wallTop-3}" font-family="monospace" font-size="1.6" fill="#666">wall face →</text>`;
+
+    // Standoff bracket (option 3)
+    if (standoffLen > 0) {
+      svg += `<line x1="${facX}" y1="${railY}" x2="${facX+standoffLen}" y2="${railY}" stroke="#999" stroke-width="1.2"/>`;
+      svg += `<text x="${facX+standoffLen/2}" y="${railY-2.5}" text-anchor="middle" font-family="monospace" font-size="1.5" fill="#777">bracket</text>`;
+    }
+
+    // Rail circle
+    const railCX = facX + railOffsetX;
+    svg += `<circle cx="${railCX}" cy="${railY}" r="${railR}" fill="#666" stroke="#ccc" stroke-width="0.5"/>`;
+    svg += `<circle cx="${railCX}" cy="${railY}" r="1.2" fill="#111" stroke="#9aabb8" stroke-width="0.35"/>`;
+
+    // Arm: rail → tag plate face (horizontal, at railY)
+    const tagFX = facX + armLen;
+    svg += `<line x1="${railCX}" y1="${railY}" x2="${tagFX}" y2="${railY}" stroke="#c8d0d8" stroke-width="1.0" stroke-dasharray="1.5,0.8"/>`;
+
+    // Tag plate (edge-on, hanging from arm — 10mm above, 110mm below arm)
+    svg += `<rect x="${tagFX-tagThick/2}" y="${railY-tagAbove}" width="${tagThick}" height="${tagAbove+tagBelow}" fill="#c8d0d8" stroke="#9aabb8" stroke-width="0.35"/>`;
+
+    // Note lines
+    noteLines.forEach((line, i) => {
+      svg += `<text x="${ox+1}" y="${wallBot+13+i*5}" font-family="monospace" font-size="1.7" fill="#555">${line}</text>`;
+    });
+  };
+
+  const opBase = optY + 5;
+  const opGap  = 100;
+
+  // Option 1: Rail on wall face — tag hangs in front
+  drawOption(margin, opBase, 1, "Rail on wall face — tag hangs in front",
+    0,   // railOffsetX: rail ON wall face
+    6,   // armLen: arm extends 6 units in front
+    0, 0,
+    ["· Rail surface-mounted on face", "· Tag hangs ~20mm in front", "· Rail line visible above tags", "· Simplest to install"]
+  );
+
+  // Option 2: Rail recessed in channel — fully hidden
+  drawOption(margin + opGap, opBase, 2, "Rail in wall channel — fully hidden",
+    -5,  // railOffsetX: rail inside channel
+    4,   // armLen: arm exits channel to just in front of face
+    8, 0,
+    ["· Channel ~30mm routed in brick", "· Rail completely hidden from front", "· Only tag face visible", "· More masonry work required"]
+  );
+
+  // Option 3: Rail on standoff — tag floats, rail behind
+  drawOption(margin + opGap*2, opBase, 3, "Rail on standoff — tag floats, rail behind",
+    8,   // railOffsetX: rail at standoff end
+    14,  // armLen: arm extends further in front
+    0, 8,
+    ["· 25–30mm standoff bracket", "· Rail hidden behind tag bodies", "· Tags 'float' from wall — shadow line", "· Most three-dimensional look"]
+  );
+
+  // ── SCALE BAR ──
   const sbX = margin, sbY = totalH - 7;
   svg += `<rect x="${sbX}" y="${sbY-2}" width="${5*SC}" height="2.5" fill="#444"/>`;
   svg += `<text x="${sbX}" y="${sbY+3}" font-family="monospace" font-size="2.5" fill="#aaa">0</text>`;
@@ -930,6 +1382,9 @@ export default function App() {
   const [hoveredVictim,  setHoveredVictim]  = useState(null);
   const [pdfBusy,        setPdfBusy]        = useState(false);
   const [tooltipPos,     setTooltipPos]     = useState({ x: 0, y: 0 });
+  const previewWinRef = useRef(null);
+  const [previewWinOpen, setPreviewWinOpen] = useState(false);
+  const [previewNudges, setPreviewNudges] = useState([]);
 
   async function handleCsv(file) {
     const text   = await file.text();
@@ -964,14 +1419,23 @@ export default function App() {
     [namesSorted, backWall, p]
   );
 
+  const adjustedTagLayout = useMemo(() => {
+    if (!previewNudges.length || previewNudges.length !== tagLayout.length) return tagLayout;
+    return tagLayout.map((t, i) => previewNudges[i] ? { ...t, xMm: t.xMm + previewNudges[i] } : t);
+  }, [tagLayout, previewNudges]);
+
   const backBricks  = useMemo(() => victims.length ? generateBrickWall(backWall,  victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend) : null, [backWall,  victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend]);
   const frontBricks = useMemo(() => victims.length ? generateBrickWall(frontWall, victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend) : null, [frontWall, victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend]);
 
-  const backWallSvg     = useMemo(() => backBricks  ? backWallPreviewSvg(backBricks, tagLayout) : "", [backBricks, tagLayout]);
+  const previewRailHeights = useMemo(() =>
+    railHeights(Number(p.tagBandMinM) * 1000, Number(p.tagBandMaxM) * 1000, Number(p.tagHmm) || 120, Number(p.railCountOverride) || 0),
+  [p.tagBandMinM, p.tagBandMaxM, p.tagHmm, p.railCountOverride]);
+
+  const backWallSvg     = useMemo(() => backBricks  ? backWallPreviewSvg(backBricks, adjustedTagLayout, previewRailHeights) : "", [backBricks, adjustedTagLayout, previewRailHeights]);
   const frontWallSvg    = useMemo(() => frontBricks ? frontWallPreviewSvg(frontBricks, p.bushHammer) : "", [frontBricks, p.bushHammer]);
   const axoSvg          = useMemo(() => frontBricks ? wallAxonometricSvg(frontBricks, p.bushHammer, Number(p.axoProtrusion) || 380, Number(p.seed) || 1) : "", [frontBricks, p.bushHammer, p.axoProtrusion, p.seed]);
-  const constructionSvg = useMemo(() => constructionDrawingSvg(backWall, frontWall, p), [backWall, frontWall, p]);
-  const dxfContent      = useMemo(() => generateDxf(backWall, frontWall, tagLayout, p), [backWall, frontWall, tagLayout, p]);
+  const constructionSvg = useMemo(() => constructionDrawingSvg(backWall, frontWall, p, adjustedTagLayout), [backWall, frontWall, p, adjustedTagLayout]);
+  const dxfContent      = useMemo(() => generateDxf(backWall, frontWall, adjustedTagLayout, p), [backWall, frontWall, adjustedTagLayout, p]);
 
   const victimByName = useMemo(
     () => new Map(victims.map(v => [`${v.last}, ${v.first}`, v])),
@@ -997,7 +1461,7 @@ export default function App() {
   async function downloadTagSvgs() {
     const zip = new JSZip();
     const keyToVictim = new Map(victims.map(v => [`${v.last}, ${v.first}`, v]));
-    tagLayout.forEach(t => {
+    adjustedTagLayout.forEach(t => {
       const v    = keyToVictim.get(t.name) || {};
       const safe = t.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_").replaceAll(/^_+|_+$/g, "").slice(0, 80);
       zip.file(`${String(t.index + 1).padStart(4, "0")}_${safe}.svg`, tagSvg(v, p));
@@ -1089,7 +1553,7 @@ export default function App() {
 
   async function downloadZip() {
     const zip = new JSZip();
-    zip.file("tags_layout.csv",          toCsv(tagLayout));
+    zip.file("tags_layout.csv",          toCsv(adjustedTagLayout));
     if (backBricks)  zip.file("bricks_backwall.csv",  toCsv(backBricks.bricks));
     if (frontBricks) zip.file("bricks_frontwall.csv", toCsv(frontBricks.bricks));
     zip.file("preview_backwall.svg",     backWallSvg);
@@ -1098,7 +1562,7 @@ export default function App() {
     zip.file("construction_1-1.dxf",     dxfContent);
 
     const keyToVictim = new Map(victims.map(v => [`${v.last}, ${v.first}`, v]));
-    tagLayout.forEach(t => {
+    adjustedTagLayout.forEach(t => {
       const v    = keyToVictim.get(t.name) || {};
       const safe = t.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_").replaceAll(/^_+|_+$/g, "").slice(0, 80);
       zip.file(`tags/${String(t.index).padStart(4,"0")}_${safe}.svg`, tagSvg(v, p));
@@ -1110,6 +1574,306 @@ export default function App() {
   function downloadDxf() {
     saveAs(new Blob([dxfContent], { type: "text/plain" }), "memorial_wall_1to1.dxf");
   }
+
+  function printA4Test() {
+    const tagW = Number(p.tagWmm) || 60;
+    const tagH = Number(p.tagHmm) || 120;
+
+    // Score each victim by total text length across all fields
+    const scored = victims.map(v => ({
+      v,
+      score: [v.first, v.last, v.birthYear, v.birthPlace, v.residence, v.deathYear]
+        .map(s => (s || "").trim().length)
+        .reduce((a, b) => a + b, 0)
+    })).sort((a, b) => a.score - b.score);
+
+    // Fit calculation for Letter (215.9×279.4mm), 10mm margin, 5mm gap
+    const margin = 10, gap = 5;
+    const usableW = 215.9 - 2 * margin, usableH = 279.4 - 2 * margin - 8; // 8mm for page title
+    const cols = Math.max(1, Math.floor((usableW + gap) / (tagW + gap)));
+    const rows = Math.max(1, Math.floor((usableH + gap) / (tagH + gap)));
+    const perPage = cols * rows;
+
+    const n = scored.length;
+    const pick = (frac) => {
+      const center = Math.round(frac * (n - 1));
+      const half = Math.floor(perPage / 2);
+      const start = Math.max(0, Math.min(n - perPage, center - half));
+      return scored.slice(start, start + perPage).map(s => s.v);
+    };
+    const pages = [
+      { tags: pick(0),    title: "SHORTEST TEXTS" },
+      { tags: pick(0.25), title: "SHORT–MEDIUM TEXTS" },
+      { tags: pick(0.5),  title: "MEDIAN TEXTS" },
+      { tags: pick(0.75), title: "MEDIUM–LONG TEXTS" },
+      { tags: pick(1),    title: "LONGEST TEXTS" },
+    ];
+
+    function makePage(tagList, title) {
+      const tagItems = tagList.map((v) => {
+        const svg = tagSvg(v, p);
+        const label = `${(v.last || "").trim()}, ${(v.first || "").trim()}`.slice(0, 28);
+        return `<div class="tag-cell"><div class="tag-label">${label}</div>${svg}</div>`;
+      }).join("");
+      return `<div class="page"><div class="page-title">${title} &nbsp;·&nbsp; ${tagW}×${tagH}mm &nbsp;·&nbsp; ${tagList.length} tags</div><div class="tag-grid">${tagItems}</div></div>`;
+    }
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Tag Print Test — Letter</title><style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#888;font-family:monospace}
+.page{width:215.9mm;height:279.4mm;background:white;padding:${margin}mm;display:flex;flex-direction:column;gap:0;margin:6mm auto;overflow:hidden}
+.page-title{font-size:8pt;color:#666;margin-bottom:4mm;letter-spacing:.05em;border-bottom:0.3mm solid #ccc;padding-bottom:2mm}
+.tag-grid{display:flex;flex-wrap:wrap;gap:${gap}mm;align-content:flex-start}
+.tag-cell{display:flex;flex-direction:column;align-items:center;gap:1mm}
+.tag-cell svg{display:block}
+.tag-label{font-size:5pt;color:#999;max-width:${tagW}mm;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;text-align:center}
+@media print{
+  body{background:white}
+  .page{margin:0;page-break-after:always;box-shadow:none}
+  @page{size:letter portrait;margin:0}
+}
+</style></head><body>
+${pages.map(pg => makePage(pg.tags, pg.title + " — print test")).join("\n")}
+</body></html>`;
+
+    const win = window.open("", "_blank", "width=900,height=800");
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+  }
+
+  function openPreviewWindow() {
+    const win = window.open("", "wall-preview-1to1", "width=1400,height=800,resizable=yes,scrollbars=yes");
+    if (!win) { alert("Popup blocked — please allow popups for this page."); return; }
+
+    const childHtml = `<!DOCTYPE html><html>
+<head><meta charset="utf-8"><title>Wall 1:1 Preview</title><style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#111;color:#39ff14;font-family:monospace;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#info{padding:6px 12px;font-size:12px;background:#0a0a0a;border-bottom:1px solid #39ff1440;flex-shrink:0;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+#container{flex:1;overflow:auto}
+label{display:flex;align-items:center;gap:5px}
+input[type=number]{width:58px;background:#1a1a1a;color:#39ff14;border:1px solid #39ff1440;padding:2px 4px}
+</style></head>
+<body>
+<div id="info">
+  <span id="status">Waiting for data\u2026</span>
+  <label>px/mm <input id="dpi" type="number" value="3.78" min="0.5" max="12" step="0.01"/></label>
+  <span style="color:#39ff1055;font-size:11px">adjust px/mm to match your screen \u00b7 scroll to navigate</span>
+</div>
+<div id="container"><svg id="stage"></svg></div>
+<script>
+var MM_PX = 3.7795;
+var lastData = null;
+var manualNudge = [];
+var lastTlLen  = 0;
+var dragging   = null;
+document.getElementById('dpi').addEventListener('input', function(e){
+  MM_PX = parseFloat(e.target.value) || 3.7795;
+  if (lastData) render(lastData);
+});
+function ex(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function makeTagSvg(victim, tagWmm, tagHmm){
+  var W = tagWmm, H = tagHmm;
+  var sx = W/60, sy = H/120;
+  var px = function(v){ return (v*sx).toFixed(2); };
+  var py = function(v){ return (v*sy).toFixed(2); };
+  var pf = function(v){ return (v*Math.min(sx,sy)).toFixed(2); };
+  var cx = (W/2).toFixed(2);
+  var ch = (8*Math.min(sx,sy)).toFixed(2);
+  var tagPath = 'M '+ch+',0 L '+(W-+ch).toFixed(2)+',0 L '+W+','+ch+' L '+W+','+H+' L 0,'+H+' L 0,'+ch+' Z';
+  var first = ex((victim.first||'').trim());
+  var last  = ex((victim.last||'').trim());
+  var bY    = ex((victim.birthYear||'').trim());
+  var bP    = ex((victim.birthPlace||'').trim());
+  var res   = ex((victim.residence||'').trim());
+  var dY    = ex((victim.deathYear||'').trim());
+  function field(label,value,lineY,valueY,labelY,fontSize,bold){
+    return '<text x="'+cx+'" y="'+py(valueY)+'" text-anchor="middle" dominant-baseline="auto" font-family="Arial,Helvetica,sans-serif" font-size="'+pf(fontSize)+'"'+(bold?' font-weight="bold"':'')+' fill="black">'+value+'</text>'
+      +'<line x1="'+px(3)+'" y1="'+py(lineY)+'" x2="'+px(57)+'" y2="'+py(lineY)+'" stroke="black" stroke-width="0.3"/>'
+      +'<text x="'+px(3)+'" y="'+py(labelY)+'" font-family="Arial,Helvetica,sans-serif" font-size="'+pf(2.8)+'" fill="#444" letter-spacing="0.2">'+label+'</text>';
+  }
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="'+W+'" height="'+H+'" viewBox="0 0 '+W+' '+H+'">'
+    +'<path d="'+tagPath+'" fill="white" stroke="black" stroke-width="0.8"/>'
+    +'<circle cx="'+cx+'" cy="'+py(9)+'" r="'+pf(4.5)+'" fill="black"/>'
+    +'<circle cx="'+cx+'" cy="'+py(9)+'" r="'+pf(2.8)+'" fill="white"/>'
+    +'<rect x="'+px(2)+'" y="'+py(19)+'" width="'+px(56)+'" height="'+py(11)+'" fill="black"/>'
+    +'<text x="'+cx+'" y="'+py(25)+'" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Helvetica,sans-serif" font-weight="bold" font-size="'+pf(5)+'" fill="white" letter-spacing="0.5">IN ERINNERUNG</text>'
+    +field('VORNAME',     first, 41,  39,  44.5, 5.5, false)
+    +field('NACHNAME',    last,  57,  53,  60.5, 8,   true)
+    +field('GEBURTSJAHR', bY,    72,  69,  75,   5,   false)
+    +field('GEBURTSORT',  bP,    84,  81,  87,   5,   false)
+    +field('WOHNORT',     res,   96,  93,  99,   5,   false)
+    +field('STERBEJAHR',  dY,   108, 105, 111,   5,   false)
+    +'</svg>';
+}
+function render(data){
+  lastData = data;
+  var tl=data.tagLayout, bg=data.brickGrid, p=data.p, victims=data.victims||[];
+  if (!bg) return;
+  if (tl.length !== lastTlLen){ manualNudge=new Array(tl.length).fill(0); lastTlLen=tl.length; }
+  var victimMap={};
+  for (var vi=0; vi<victims.length; vi++){ var v=victims[vi]; victimMap[v.last+', '+v.first]=v; }
+  var wallW=bg.wallWmm, wallH=bg.wallHmm;
+  var bandMin=p.tagBandMinM*1000, bandMax=p.tagBandMaxM*1000, margin=300;
+  var cropTop=Math.max(0,wallH-bandMax-margin), cropBot=Math.min(wallH,wallH-bandMin+margin);
+  var cropH=cropBot-cropTop;
+  var W=Math.round(wallW*MM_PX), H=Math.round(cropH*MM_PX);
+  var tagWpx=p.tagWmm*MM_PX, tagHpx=p.tagHmm*MM_PX;
+  var parts=[];
+  parts.push('<rect x="0" y="0" width="'+W+'" height="'+H+'" fill="#d4c9b8"/>');
+  for (var i=0; i<bg.bricks.length; i++){
+    var b=bg.bricks[i];
+    if (b.yMm+b.hMm<cropTop||b.yMm>cropBot) continue;
+    parts.push('<rect x="'+(b.xMm*MM_PX).toFixed(1)+'" y="'+((b.yMm-cropTop)*MM_PX).toFixed(1)+'" width="'+Math.max(1,b.wMm*MM_PX).toFixed(1)+'" height="'+Math.max(1,b.hMm*MM_PX).toFixed(1)+'" fill="'+b.color+'"/>');
+  }
+  var btY=((wallH-bandMax-cropTop)*MM_PX).toFixed(1), bbY=((wallH-bandMin-cropTop)*MM_PX).toFixed(1);
+  parts.push('<rect x="0" y="'+btY+'" width="'+W+'" height="'+(bbY-btY).toFixed(1)+'" fill="rgba(34,102,170,0.07)" stroke="rgba(34,102,170,0.3)" stroke-width="1.5" stroke-dasharray="10,8"/>');
+  var railHeights=data.railHeights||[];
+  for (var ri=0; ri<railHeights.length; ri++){
+    var rMm=railHeights[ri], rFromTop=wallH-rMm;
+    if (rFromTop<cropTop||rFromTop>cropBot) continue;
+    var ry=((rFromTop-cropTop)*MM_PX).toFixed(1);
+    parts.push('<line x1="0" y1="'+ry+'" x2="'+W+'" y2="'+ry+'" stroke="#b0a090" stroke-width="3.5" stroke-opacity="0.9"/>');
+    parts.push('<text x="5" y="'+(+ry-4)+'" font-family="monospace" font-size="11" fill="#b0a090cc">R'+(ri+1)+'</text>');
+  }
+  var holeOffY=p.tagHmm*(9/120), holeOffX=p.tagWmm/2;
+  var holeR=4.5*Math.min(p.tagWmm/60,p.tagHmm/120), maxNudge=p.tagWmm*0.4;
+  var worldTops=[];
+  for (var j=0; j<tl.length; j++) worldTops.push(wallH-tl[j].yMm-tl[j].hMm);
+  var nudge=new Array(tl.length);
+  for (var j=0; j<tl.length; j++) nudge[j]=manualNudge[j];
+  function holeBlocked(idx){
+    var hx=tl[idx].xMm+nudge[idx]+holeOffX, hy=worldTops[idx]+holeOffY;
+    for (var k=0; k<tl.length; k++){
+      if (k===idx) continue;
+      var tx2=tl[k].xMm+nudge[k];
+      if (tx2>hx+holeR||tx2+tl[k].wMm<hx-holeR) continue;
+      if (worldTops[k]>hy+holeR||worldTops[k]+tl[k].hMm<hy-holeR) continue;
+      return true;
+    }
+    return false;
+  }
+  for (var iter=0; iter<5; iter++){
+    var anyChange=false;
+    for (var j=0; j<tl.length; j++){
+      if (manualNudge[j]!==0) continue;
+      if (!holeBlocked(j)) continue;
+      var hx=tl[j].xMm+nudge[j]+holeOffX, hy=worldTops[j]+holeOffY, bestShift=null;
+      for (var k=0; k<tl.length; k++){
+        if (k===j) continue;
+        var tx2=tl[k].xMm+nudge[k];
+        if (tx2>hx+holeR||tx2+tl[k].wMm<hx-holeR) continue;
+        if (worldTops[k]>hy+holeR||worldTops[k]+tl[k].hMm<hy-holeR) continue;
+        var sL=(tx2-holeR*1.2)-hx, sR=(tx2+tl[k].wMm+holeR*1.2)-hx;
+        var s=Math.abs(sL)<Math.abs(sR)?sL:sR;
+        if (bestShift===null||Math.abs(s)<Math.abs(bestShift)) bestShift=s;
+      }
+      if (bestShift!==null&&Math.abs(bestShift)<=maxNudge){ nudge[j]+=bestShift; anyChange=true; }
+    }
+    if (!anyChange) break;
+  }
+  var blockedCount=0, resolvedCount=0, stillBlocked=[];
+  for (var j=0; j<tl.length; j++){
+    var bl=holeBlocked(j); stillBlocked.push(bl);
+    if (bl) blockedCount++;
+    else if (nudge[j]!==0) resolvedCount++;
+  }
+  for (var j=0; j<tl.length; j++){
+    var t=tl[j], worldTop=worldTops[j];
+    if (worldTop+t.hMm<cropTop||worldTop>cropBot) continue;
+    var adjX=t.xMm+nudge[j];
+    var tx=(adjX*MM_PX).toFixed(1), ty=((worldTop-cropTop)*MM_PX).toFixed(1);
+    var hcx=((adjX+holeOffX)*MM_PX).toFixed(1), hcy=((worldTop+holeOffY-cropTop)*MM_PX).toFixed(1);
+    var hr=(holeR*MM_PX*2.2).toFixed(1);
+    var victim=victimMap[t.name]||{last:t.name.split(', ')[0]||'',first:t.name.split(', ')[1]||''};
+    var svgStr=makeTagSvg(victim,p.tagWmm,p.tagHmm);
+    var dataUri='data:image/svg+xml,'+encodeURIComponent(svgStr);
+    var moved=nudge[j]!==0;
+    parts.push('<g data-tag-idx="'+j+'" data-orig-x="'+t.xMm+'" style="cursor:grab">');
+    if (moved&&!stillBlocked[j])
+      parts.push('<rect x="'+((adjX*MM_PX-1.5).toFixed(1))+'" y="'+(((worldTop-cropTop)*MM_PX-1.5).toFixed(1))+'" width="'+(tagWpx+3).toFixed(1)+'" height="'+(tagHpx+3).toFixed(1)+'" fill="none" stroke="#ffd700" stroke-width="2" opacity="0.85"/>');
+    parts.push('<image href="'+dataUri+'" x="'+tx+'" y="'+ty+'" width="'+tagWpx.toFixed(1)+'" height="'+tagHpx.toFixed(1)+'" style="pointer-events:all"/>');
+    if (stillBlocked[j]){
+      parts.push('<circle cx="'+hcx+'" cy="'+hcy+'" r="'+hr+'" fill="none" stroke="#ff2020" stroke-width="2" opacity="0.85"/>');
+      parts.push('<circle cx="'+hcx+'" cy="'+hcy+'" r="'+(holeR*MM_PX*0.5).toFixed(1)+'" fill="#ff202066"/>');
+    }
+    parts.push('</g>');
+  }
+  var rH=18;
+  parts.push('<rect x="0" y="0" width="'+W+'" height="'+rH+'" fill="rgba(0,0,0,0.82)"/>');
+  for (var x=0; x<=wallW; x+=500){
+    var rx=(x*MM_PX).toFixed(1), major=x%1000===0;
+    parts.push('<line x1="'+rx+'" y1="'+(major?0:rH/2)+'" x2="'+rx+'" y2="'+rH+'" stroke="#39ff14" stroke-width="'+(major?1:0.5)+'"/>');
+    if (major) parts.push('<text x="'+(+rx+3)+'" y="'+(rH-3)+'" font-family="monospace" font-size="10" fill="#39ff14">'+(x/1000)+'m</text>');
+  }
+  var svg=document.getElementById('stage');
+  svg.setAttribute('width',W); svg.setAttribute('height',H);
+  svg.innerHTML=parts.join('');
+  svg.querySelectorAll('g[data-tag-idx]').forEach(function(g){
+    g.addEventListener('mousedown', onTagMouseDown);
+  });
+  var warn=(blockedCount>0?' ⚠ '+blockedCount+' unresolvable':'')+(resolvedCount>0?' ✓ '+resolvedCount+' nudged':'');
+  document.getElementById('status').textContent='1:1 · '+tl.length+' tags · band '+p.tagBandMinM+'–'+p.tagBandMaxM+'m · '+MM_PX.toFixed(2)+'px/mm'+warn;
+  if (window.opener) window.opener.postMessage({type:'wall-1to1-positions', nudges:nudge.slice()}, '*');
+}
+function onTagMouseDown(e){
+  e.preventDefault();
+  var g=e.currentTarget;
+  dragging={idx:parseInt(g.getAttribute('data-tag-idx')), origXmm:parseFloat(g.getAttribute('data-orig-x')), startClientX:e.clientX, startNudgeMm:manualNudge[parseInt(g.getAttribute('data-tag-idx'))], g:g};
+  g.style.cursor='grabbing';
+  document.body.style.userSelect='none';
+}
+document.addEventListener('mousemove', function(e){
+  if (!dragging) return;
+  var dxPx=e.clientX-dragging.startClientX;
+  manualNudge[dragging.idx]=dragging.startNudgeMm+dxPx/MM_PX;
+  dragging.g.setAttribute('transform','translate('+dxPx+',0)');
+});
+document.addEventListener('mouseup', function(){
+  if (!dragging) return;
+  dragging.g.style.cursor='grab';
+  dragging.g.removeAttribute('transform');
+  document.body.style.userSelect='';
+  dragging=null;
+  render(lastData);
+});
+window.addEventListener('message', function(e){
+  if (e.data && e.data.type === 'wall-1to1-update') render(e.data);
+});
+window.opener && window.opener.postMessage({type:'wall-1to1-ready'},'*');
+</script>
+</body></html>`;
+
+    win.document.open();
+    win.document.write(childHtml);
+    win.document.close();
+    previewWinRef.current = win;
+    // listen for child 'ready' signal, then send initial data
+    const onReady = (e) => {
+      if (e.data?.type === "wall-1to1-ready" && e.source === win) {
+        win.postMessage({ type: "wall-1to1-update", tagLayout, brickGrid: backBricks, p, victims, railHeights: previewRailHeights }, "*");
+        window.removeEventListener("message", onReady);
+      }
+    };
+    window.addEventListener("message", onReady);
+    setPreviewWinOpen(o => !o); // toggle to force effect re-run
+  }
+
+  // live-update the preview window whenever layout or params change
+  useEffect(() => {
+    const win = previewWinRef.current;
+    if (!win || win.closed || !backBricks) return;
+    win.postMessage({ type: "wall-1to1-update", tagLayout, brickGrid: backBricks, p, victims, railHeights: previewRailHeights }, "*");
+  }, [tagLayout, backBricks, p, victims, previewRailHeights, previewWinOpen]);
+
+  useEffect(() => {
+    function onMsg(e) {
+      if (e.data?.type === "wall-1to1-positions") setPreviewNudges(e.data.nudges || []);
+    }
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
 
   const inp = { width: "100%", display: "block" };
 
@@ -1162,6 +1926,9 @@ export default function App() {
           <hr />
 
           <h3>3) Brick color pattern</h3>
+          <div style={{ fontSize: 11, color: "#aaa", marginBottom: 6 }}>
+            Brick sizes: standard 270×75mm (60%) · half 140×75mm (25%) · one-and-half 400×75mm (15%) · mortar joint 2mm
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
             {[
               { val: "random",    label: "Random",    desc: "Each brick picks site by victim-count weight — fully scattered" },
@@ -1273,27 +2040,20 @@ export default function App() {
 
           <div style={{ marginTop: 10 }}>
             <label style={{ fontSize: 12 }}>
-              Min X gap <b>{Number(p.minGapMult).toFixed(2)}×</b> tag width
-              ({(Number(p.tagWmm) * Number(p.minGapMult)).toFixed(0)} mm)
-              <input type="range" min="0" max="3" step="0.05" value={p.minGapMult}
+              Tag X spacing: <b>{(Number(p.tagWmm) * Number(p.minGapMult)).toFixed(0)} mm</b> start-to-start
+              {Number(p.minGapMult) < 1
+                ? <span style={{color:"#39ff14"}}> ({((1-Number(p.minGapMult))*Number(p.tagWmm)).toFixed(0)} mm overlap)</span>
+                : Number(p.minGapMult) > 1
+                ? <span style={{color:"#aaa"}}> ({((Number(p.minGapMult)-1)*Number(p.tagWmm)).toFixed(0)} mm gap)</span>
+                : <span style={{color:"#666"}}> (touching)</span>}
+              <input type="range" min="0.1" max="3" step="0.05" value={p.minGapMult}
                 onChange={e => setP({...p, minGapMult: +e.target.value})}
                 style={{ ...inp, accentColor: "#39ff14" }} />
             </label>
-            <div style={{ fontSize: 11, color: "#39ff1066" }}>
-              {Number(p.minGapMult) < 1 ? `Overlap ${((1-Number(p.minGapMult))*100).toFixed(0)}% — tags will chime` : Number(p.minGapMult) === 1 ? "No overlap — tags touch" : `Gap ${((Number(p.minGapMult)-1)*Number(p.tagWmm)).toFixed(0)} mm between tags`}
-            </div>
           </div>
 
-          <div style={{ marginTop: 8 }}>
-            <label style={{ fontSize: 12 }}>
-              Y jitter <b>{Number(p.yJitter).toFixed(2)}</b>
-              <input type="range" min="0" max="1" step="0.02" value={p.yJitter}
-                onChange={e => setP({...p, yJitter: +e.target.value})}
-                style={{ ...inp, accentColor: "#39ff14" }} />
-            </label>
-            <div style={{ fontSize: 11, color: "#39ff1066" }}>
-              {Number(p.yJitter) === 0 ? "No vertical jitter — tags locked to rail height" : Number(p.yJitter) > 0.6 ? "High jitter — organic feel" : "Slight vertical variation within rail slot"}
-            </div>
+          <div style={{ marginTop: 8, fontSize: 11, color: "#39ff1066" }}>
+            Y position fixed per rail — add more rails for vertical variety
           </div>
 
           <div style={{ marginTop: 8 }}>
@@ -1389,6 +2149,12 @@ export default function App() {
             </button>
             <button onClick={downloadDxf} style={{ padding: "6px 0", fontSize: 12 }}>
               Download 1:1 DXF only (open in AutoCAD / Rhino → save as .dwg)
+            </button>
+            <button onClick={openPreviewWindow} disabled={!backBricks} style={{ padding: "8px 0", background: "#39ff1415", border: "1px solid #39ff14", color: "#39ff14", fontWeight: "bold" }}>
+              Open 1:1 wall preview ↗
+            </button>
+            <button onClick={printA4Test} disabled={!victims.length} style={{ padding: "6px 0", fontSize: 12 }}>
+              Letter print test (shortest + longest texts) ↗
             </button>
           </div>
 
