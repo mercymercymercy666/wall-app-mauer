@@ -1,4 +1,4 @@
-# Memorial Wall Generator
+# Wall/Tag Generator for Memorial Project
 
 A parametric brick wall generator for memorial wall design, built with React and Vite.
 
