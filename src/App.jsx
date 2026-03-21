@@ -1,7 +1,16 @@
 import React, { useMemo, useState, useRef, useEffect } from "react";
 import Papa from "papaparse";
 import JSZip from "jszip";
-import { saveAs } from "file-saver";
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.setAttribute('download', filename);
+  a.style.cssText = 'position:fixed;top:-200px;left:-200px;opacity:0;';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 3000);
+}
 import tinycolor from "tinycolor2";
 import jsPDF from "jspdf";
 
@@ -40,6 +49,7 @@ const DEFAULTS = {
   brickBlend: 0.25,         // 0 = pure structure, 1 = fully random bleed (for zoned/striped)
   bushHammer: "none",       // "none" | "horizontal" | "vertical" | "diagonal" | "sectional"
   axoProtrusion: 40,        // axonometric wall depth in mm
+  autoFitText: false,       // shrink overflow fields to fit tag width
 };
 
 // Preview: 0.1px per mm = 1px per cm
@@ -651,19 +661,17 @@ function wallAxonometricSvg(brickGrid, bushHammer = "none", protrusionMm = 380, 
 /* -----------------------
    Construction drawing SVG — 1:100 technical elevation
 ------------------------ */
-function constructionDrawingSvg(backWall, frontWall, p, tagLayout = []) {
+function constructionDrawingSvg(backWall, frontWall, p, tagLayout = [], dragOffsets = {}) {
+  const off = key => { const o = dragOffsets[key]; return o ? `translate(${o.x.toFixed(2)},${o.y.toFixed(2)})` : 'translate(0,0)'; };
   const SC = 10, margin = 45, wallGap = 35;
   const bW = backWall.lengthM  * SC, bH = backWall.heightM  * SC;
   const fW = frontWall.lengthM * SC, fH = frontWall.heightM * SC;
-  const detailH = 100;
-  const optionsH = 100;
-  const totalW = Math.max(bW, fW) + 2 * margin + 150;
-  const totalH = 22 + bH + wallGap + fH + 2 * margin + detailH + optionsH + 15;
+  const totalW = Math.max(bW, fW) + 2 * margin + 230;
   const displayW = 1800;
-  const displayH = Math.round(totalH * displayW / totalW);
 
   const bX0 = margin, bY0 = 26;
   const fX0 = margin, fY0 = bY0 + bH + wallGap + 12;
+  const detailStartY = fY0 + fH + 48;
   const bandTopY = bH - Number(p.tagBandMaxM) * SC;
   const bandBotY = bH - Number(p.tagBandMinM) * SC;
   const tagHmm = Number(p.tagHmm) || 120;
@@ -699,7 +707,7 @@ function constructionDrawingSvg(backWall, frontWall, p, tagLayout = []) {
 <text x="${x+off+3}" y="${mid}" dominant-baseline="middle" font-family="monospace" font-size="3" fill="#ddd">${label}</text>`;
   };
 
-  let svg = `<rect x="0" y="0" width="${totalW}" height="${totalH}" fill="#0e0e0e"/>`;
+  let svg = `<rect x="0" y="0" width="${totalW}" height="9999" fill="#0e0e0e"/>`;
   svg += `<text x="${totalW/2}" y="9" text-anchor="middle" font-family="monospace" font-size="5" font-weight="bold" fill="#39ff14">MEMORIAL WALL — CONSTRUCTION DRAWING  1:100</text>`;
   svg += `<text x="${totalW/2}" y="16" text-anchor="middle" font-family="monospace" font-size="3" fill="#39ff1488">Back ${backWall.lengthM}×${backWall.heightM}m  ·  Front ${frontWall.lengthM}×${frontWall.heightM}m  ·  Tag band ${Number(p.tagBandMinM).toFixed(2)}–${Number(p.tagBandMaxM).toFixed(2)}m  ·  ${rHeights.length} rails  ·  ${tagLayout.length} tags</text>`;
 
@@ -770,15 +778,16 @@ function constructionDrawingSvg(backWall, frontWall, p, tagLayout = []) {
   }
 
   // ── DETAIL A: Tag on Rail — Section + Face views (NTS) ──
-  const dX = annX + 50, dY = bY0 + 2;
+  const dX = margin, dY = detailStartY;
   svg += `<defs><pattern id="mhatch_a" width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
     <line x1="0" y1="0" x2="0" y2="3" stroke="#555" stroke-width="0.7"/>
   </pattern></defs>`;
-  svg += `<text x="${dX}" y="${dY-1}" font-family="monospace" font-size="2.5" font-weight="bold" fill="#aaa">DETAIL A  Tag + Rail in Channel  NTS</text>`;
+  svg += `<g id="drag-detailA" transform="${off('detailA')}" cursor="move" style="cursor:move">`;
+  svg += `<text x="${dX}" y="${dY-1}" font-family="monospace" font-size="2.5" font-weight="bold" fill="#aaa">DETAIL A  Tag + Rail in Channel  <tspan font-size="1.8" fill="#555">Scale 1:3</tspan></text>`;
 
-  // Scale: 1 SVG unit ≈ 3.6mm
-  const Sd = 0.278;
-  const wFx  = dX + 22;
+  // Scale 1:3 — 1 SVG unit = 3mm
+  const Sd = 1/3;
+  const wFx  = dX + 50;   // 150mm wall thickness at 1:3
   const chD  = +(30 * Sd).toFixed(1);  // channel depth SVG ≈ 8.3
   const chH  = +(35 * Sd).toFixed(1);  // channel height SVG ≈ 9.7
   const chLX = wFx - chD;
@@ -795,147 +804,311 @@ function constructionDrawingSvg(backWall, frontWall, p, tagLayout = []) {
   const tagEdge   = Math.max(0.9, 3 * Sd); // 3mm plate thickness, edge-on
 
   // ── SECTION VIEW (side: back-wall left, wall-face right) ──
-  // Masonry hatch: above channel, below channel, behind channel
-  svg += `<rect x="${dX}"   y="${(chTY-7).toFixed(1)}"  width="${(wFx-dX)}" height="7"                               fill="url(#mhatch_a)" stroke="none"/>`;
-  svg += `<rect x="${dX}"   y="${chBY.toFixed(1)}"       width="${(wFx-dX)}" height="${(tagBotYA-chBY+7).toFixed(1)}"  fill="url(#mhatch_a)" stroke="none"/>`;
-  svg += `<rect x="${dX}"   y="${chTY.toFixed(1)}"       width="${(chLX-dX).toFixed(1)}" height="${chH}"             fill="url(#mhatch_a)" stroke="none"/>`;
-  // Wall outline
-  svg += `<rect x="${dX}" y="${(chTY-7).toFixed(1)}" width="${wFx-dX}" height="${(tagBotYA-chTY+14).toFixed(1)}" fill="none" stroke="#888" stroke-width="0.5"/>`;
+  const armExt   = +(32 * Sd).toFixed(2);  // ~32mm arm
+  const tagFaceX = wFx + +armExt;
+  const cThick   = +(3  * Sd).toFixed(2);  // C-profile plate thickness 3mm
+  const cFlangeL = +(24 * Sd).toFixed(2);  // C-profile flange length 24mm
+
+  // Brick course above channel
+  svg += `<rect x="${dX}" y="${(chTY-8).toFixed(1)}" width="${wFx-dX}" height="8" fill="url(#mhatch_a)" stroke="none"/>`;
+  svg += `<rect x="${dX}" y="${(chTY-8).toFixed(1)}" width="${wFx-dX}" height="8" fill="none" stroke="#888" stroke-width="0.5"/>`;
+  svg += `<text x="${((dX+wFx)/2).toFixed(1)}" y="${(chTY-2.5).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.8" fill="#666">BRICK COURSE</text>`;
+  // Brick course below channel
+  svg += `<rect x="${dX}" y="${chBY.toFixed(1)}" width="${wFx-dX}" height="${(tagBotYA-chBY+7).toFixed(1)}" fill="url(#mhatch_a)" stroke="none"/>`;
+  svg += `<rect x="${dX}" y="${chBY.toFixed(1)}" width="${wFx-dX}" height="${(tagBotYA-chBY+7).toFixed(1)}" fill="none" stroke="#888" stroke-width="0.5"/>`;
+  svg += `<text x="${((dX+wFx)/2).toFixed(1)}" y="${(chBY+4).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.8" fill="#666">BRICK COURSE</text>`;
+  // Mortar joint label (channel is routed in mortar joint between courses)
+  svg += `<text x="${(dX+1).toFixed(1)}" y="${(railCYA+0.6).toFixed(1)}" font-family="monospace" font-size="1.5" fill="#7788aa">mortar joint /</text>`;
+  svg += `<text x="${(dX+1).toFixed(1)}" y="${(railCYA+3.5).toFixed(1)}" font-family="monospace" font-size="1.5" fill="#7788aa">channel</text>`;
+  // Brick behind channel (left of C-profile)
+  svg += `<rect x="${dX}" y="${chTY.toFixed(1)}" width="${(chLX-dX).toFixed(1)}" height="${chH}" fill="url(#mhatch_a)" stroke="none"/>`;
+
   // Channel void
   svg += `<rect x="${chLX.toFixed(1)}" y="${chTY.toFixed(1)}" width="${chD}" height="${chH}" fill="#111" stroke="none"/>`;
-  svg += `<line x1="${chLX.toFixed(1)}" y1="${chTY.toFixed(1)}" x2="${wFx}" y2="${chTY.toFixed(1)}" stroke="#ccc" stroke-width="0.7"/>`;
-  svg += `<line x1="${chLX.toFixed(1)}" y1="${chBY.toFixed(1)}" x2="${wFx}" y2="${chBY.toFixed(1)}" stroke="#ccc" stroke-width="0.7"/>`;
-  svg += `<line x1="${chLX.toFixed(1)}" y1="${chTY.toFixed(1)}" x2="${chLX.toFixed(1)}" y2="${chBY.toFixed(1)}" stroke="#ccc" stroke-width="0.5"/>`;
-  // Wall face (bold vertical line)
-  svg += `<line x1="${wFx}" y1="${(chTY-9).toFixed(1)}" x2="${wFx}" y2="${(tagBotYA+8).toFixed(1)}" stroke="#ddd" stroke-width="1.1"/>`;
-  // Rail circle (cross section of Ø16mm rod inside channel)
-  // Arm protrudes from rail through wall face into air in front
-  const armExt   = +(18 * Sd).toFixed(2);  // ~18mm arm extension in front of wall face
-  const tagFaceX = wFx + +armExt;
 
-  // Air space tint in front of wall (where tag plate hangs)
+  // C-profile (S.S. channel liner): web at back, flanges toward wall face, opening at front
+  svg += `<rect x="${chLX.toFixed(1)}" y="${chTY.toFixed(1)}" width="${cThick}" height="${(+chH).toFixed(1)}" fill="#8899aa" stroke="none"/>`; // web
+  svg += `<rect x="${chLX.toFixed(1)}" y="${chTY.toFixed(1)}" width="${cFlangeL}" height="${cThick}" fill="#8899aa" stroke="none"/>`; // top flange
+  svg += `<rect x="${chLX.toFixed(1)}" y="${(chBY - +cThick).toFixed(1)}" width="${cFlangeL}" height="${cThick}" fill="#8899aa" stroke="none"/>`; // bottom flange
+  svg += `<polyline points="${(chLX + +cFlangeL).toFixed(1)},${chTY.toFixed(1)} ${chLX.toFixed(1)},${chTY.toFixed(1)} ${chLX.toFixed(1)},${chBY.toFixed(1)} ${(chLX + +cFlangeL).toFixed(1)},${chBY.toFixed(1)}" fill="none" stroke="#ccc" stroke-width="0.6"/>`;
+
+  // Adjustable anchor rods (threaded, cast into masonry — allow depth adjustment)
+  const rod1Y = chTY + +chH * 0.28;
+  const rod2Y = chTY + +chH * 0.72;
+  [rod1Y, rod2Y].forEach(ry => {
+    svg += `<line x1="${(dX+2).toFixed(1)}" y1="${ry.toFixed(1)}" x2="${chLX.toFixed(1)}" y2="${ry.toFixed(1)}" stroke="#9aabb8" stroke-width="0.5" stroke-dasharray="1.2,0.7"/>`;
+    svg += `<rect x="${(chLX-1.5).toFixed(1)}" y="${(ry-0.8).toFixed(1)}" width="1.6" height="1.6" fill="#9aabb8" stroke="#ccc" stroke-width="0.3"/>`;
+  });
+  svg += `<text x="${(dX+1).toFixed(1)}" y="${(rod1Y-1.2).toFixed(1)}" font-family="monospace" font-size="1.4" fill="#7788aa">adj. rod</text>`;
+
+  // Wall face line
+  svg += `<line x1="${wFx}" y1="${(chTY-10).toFixed(1)}" x2="${wFx}" y2="${(tagBotYA+8).toFixed(1)}" stroke="#ddd" stroke-width="1.1"/>`;
+
+  // Air space tint in front of wall
   svg += `<rect x="${wFx.toFixed(1)}" y="${tagTopYA.toFixed(1)}" width="${armExt}" height="${tagH_svgA.toFixed(1)}" fill="#1c2535" stroke="none"/>`;
 
-  // Arm: horizontal bracket from rail (inside channel) through wall face to plate face
-  svg += `<line x1="${railCXA.toFixed(1)}" y1="${railCYA.toFixed(1)}" x2="${tagFaceX.toFixed(1)}" y2="${railCYA.toFixed(1)}" stroke="#c8d0d8" stroke-width="${tagEdge.toFixed(1)}"/>`;
-
-  // Tag plate (edge-on strip) in front of wall face, hanging from arm end
-  svg += `<rect x="${(tagFaceX - tagEdge/2).toFixed(1)}" y="${tagTopYA.toFixed(1)}" width="${tagEdge.toFixed(1)}" height="${tagH_svgA.toFixed(1)}" fill="#c8d0d8" stroke="#9aabb8" stroke-width="0.35"/>`;
-
-  // Fixed Ø20mm hole in tag — centered on rail inside channel
+  // Rail circle (inside C-profile)
   svg += `<circle cx="${railCXA.toFixed(1)}" cy="${railCYA.toFixed(1)}" r="${holeRA.toFixed(2)}" fill="#1a1a1a" stroke="#8899aa" stroke-width="0.5"/>`;
   svg += `<circle cx="${railCXA.toFixed(1)}" cy="${railCYA.toFixed(1)}" r="${railRA}" fill="#888" stroke="#bbb" stroke-width="0.6"/>`;
 
-  // Labels
-  svg += `<text x="${wFx+1}" y="${(chTY-4).toFixed(1)}" font-family="monospace" font-size="1.8" fill="#39ff1480">wall face →</text>`;
-  svg += `<text x="${(dX+1)}" y="${(railCYA+0.7).toFixed(1)}" font-family="monospace" font-size="1.6" fill="#888">channel</text>`;
-  svg += `<text x="${(railCXA-railRA-1).toFixed(1)}" y="${(railCYA-railRA-2).toFixed(1)}" text-anchor="end" font-family="monospace" font-size="1.7" fill="#aaa">Ø16 rail</text>`;
-  svg += `<text x="${(railCXA + holeRA + 0.5).toFixed(1)}" y="${(railCYA - holeRA - 0.5).toFixed(1)}" font-family="monospace" font-size="1.4" fill="#8899aa">Ø20 hole</text>`;
-  svg += `<text x="${(tagFaceX + tagEdge/2 + 0.5).toFixed(1)}" y="${(railCYA + 2).toFixed(1)}" font-family="monospace" font-size="1.6" fill="#c8d0d8">tag</text>`;
-  svg += `<text x="${((railCXA + tagFaceX)/2).toFixed(1)}" y="${(railCYA - tagEdge/2 - 1).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.4" fill="#9aabb8">arm</text>`;
-  // Dimension — channel depth
+  // Arm: horizontal bracket from rail through wall face to plate face
+  svg += `<line x1="${railCXA.toFixed(1)}" y1="${railCYA.toFixed(1)}" x2="${tagFaceX.toFixed(1)}" y2="${railCYA.toFixed(1)}" stroke="#c8d0d8" stroke-width="${tagEdge.toFixed(1)}"/>`;
+
+  // Tag plate (edge-on) in front of wall face
+  svg += `<rect x="${(tagFaceX - tagEdge/2).toFixed(1)}" y="${tagTopYA.toFixed(1)}" width="${tagEdge.toFixed(1)}" height="${tagH_svgA.toFixed(1)}" fill="#c8d0d8" stroke="#9aabb8" stroke-width="0.35"/>`;
+
+  // Hex bolt head (side profile on front face of tag at hole level)
+  // Seen from side: rectangle (head_height × head_depth) protruding from tag face
+  const hexBoltH = +(18 * Sd).toFixed(2);  // 18mm dia seen from side
+  const hexBoltD = +(10 * Sd).toFixed(2);  // 10mm depth sticking out
+  const hexX = tagFaceX + tagEdge / 2;
+  svg += `<rect x="${hexX.toFixed(2)}" y="${(railCYA - +hexBoltH/2).toFixed(2)}" width="${hexBoltD}" height="${hexBoltH}" fill="#8899aa" stroke="#ccc" stroke-width="0.35"/>`;
+  // Inner recess line (hex socket in bolt head)
+  svg += `<line x1="${(hexX + +hexBoltD*0.25).toFixed(2)}" y1="${(railCYA - +hexBoltH*0.3).toFixed(2)}" x2="${(hexX + +hexBoltD*0.25).toFixed(2)}" y2="${(railCYA + +hexBoltH*0.3).toFixed(2)}" stroke="#555" stroke-width="0.3"/>`;
+
+  // Security cap (snaps over hex, dashed outline = removable)
+  const capD = +(14 * Sd).toFixed(2);  // cap depth
+  const capH = +(24 * Sd).toFixed(2);  // cap outer diameter (larger than bolt)
+  svg += `<rect x="${hexX.toFixed(2)}" y="${(railCYA - +capH/2).toFixed(2)}" width="${capD}" height="${capH}" fill="none" stroke="#aaa" stroke-width="0.5" stroke-dasharray="1.5,0.8"/>`;
+  svg += `<text x="${(hexX + +capD + 0.5).toFixed(1)}" y="${(railCYA + 0.6).toFixed(1)}" font-family="monospace" font-size="1.5" fill="#888">cap</text>`;
+  svg += `<text x="${(hexX + +hexBoltD + 0.5).toFixed(1)}" y="${(railCYA - +capH/2 - 0.5).toFixed(1)}" font-family="monospace" font-size="1.4" fill="#8899aa">hex bolt</text>`;
+
+  // Labels — clear positions, no overlap
+  svg += `<text x="${(wFx+1).toFixed(1)}" y="${(chTY-6).toFixed(1)}" font-family="monospace" font-size="1.8" fill="#39ff1480">wall face →</text>`;
+  svg += `<text x="${(railCXA).toFixed(1)}" y="${(railCYA+railRA+3).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.5" fill="#aaa">Ø16 rail</text>`;
+  svg += `<text x="${(railCXA).toFixed(1)}" y="${(chTY-1.5).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.4" fill="#8899aa">C-profile liner</text>`;
+  svg += `<text x="${(tagFaceX - 0.5).toFixed(1)}" y="${(tagTopYA - 2).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.6" fill="#c8d0d8">tag plate</text>`;
+  svg += `<text x="${((railCXA + tagFaceX)/2).toFixed(1)}" y="${(railCYA - 2).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.4" fill="#9aabb8">arm</text>`;
+  // Dimensions
   svg += `<line x1="${chLX.toFixed(1)}" y1="${(chBY+5).toFixed(1)}" x2="${wFx}" y2="${(chBY+5).toFixed(1)}" stroke="#ccc" stroke-width="0.4" marker-start="url(#arrR)" marker-end="url(#arr)"/>`;
   svg += `<text x="${((chLX+wFx)/2).toFixed(1)}" y="${(chBY+9).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.8" fill="#ddd">30mm</text>`;
-  // Dimension — channel height
   svg += vDim(chLX - 5, chTY, chBY, `35mm`, 3);
-  // Dimension — full tag height at plate face
   svg += vDim(tagFaceX + tagEdge + 1, tagTopYA, tagBotYA, `${tagHmm}mm`, 3);
   svg += `<text x="${((dX+wFx)/2).toFixed(1)}" y="${(tagBotYA+12).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.7" fill="#444">SECTION  SIDE VIEW</text>`;
 
   // ── FRONT FACE VIEW (right side) ──
-  // Y coords match section view: tagTopYA = railCYA - 10*Sd (hole is 10mm from tag top)
-  const fvX    = dX + 52;   // clear of arm + labels
+  const fvX  = tagFaceX + +tagEdge + +capD + 14;   // clear past bolt+cap + gap
   const fvTagX = fvX + 3;
-  const fvTagY = tagTopYA;  // full tag from top — matches section view
+  const fvTagY = tagTopYA;
 
   // Wall face background
-  svg += `<rect x="${fvX}" y="${(chTY-7).toFixed(1)}" width="${(tagW_svgA+6).toFixed(1)}" height="${(tagBotYA-chTY+14).toFixed(1)}" fill="#1c1c1c" stroke="#444" stroke-width="0.4"/>`;
+  svg += `<rect x="${fvX}" y="${(chTY-8).toFixed(1)}" width="${(tagW_svgA+6).toFixed(1)}" height="${(tagBotYA-chTY+15).toFixed(1)}" fill="#1c1c1c" stroke="#444" stroke-width="0.4"/>`;
 
-  // Channel — drawn first (behind), shown as dashed hidden lines
-  svg += `<rect x="${fvX}" y="${chTY.toFixed(1)}" width="${(tagW_svgA+6).toFixed(1)}" height="${chH}" fill="#181818" stroke="none"/>`;
+  // Brick joint lines (hidden, dashed — channel sits between brick courses)
   svg += `<line x1="${fvX}" y1="${chTY.toFixed(1)}" x2="${(fvX+tagW_svgA+6).toFixed(1)}" y2="${chTY.toFixed(1)}" stroke="#555" stroke-width="0.5" stroke-dasharray="2,2"/>`;
   svg += `<line x1="${fvX}" y1="${chBY.toFixed(1)}" x2="${(fvX+tagW_svgA+6).toFixed(1)}" y2="${chBY.toFixed(1)}" stroke="#555" stroke-width="0.5" stroke-dasharray="2,2"/>`;
 
-  // Rail — dashed line at hole height (hidden behind wall), drawn before tag
+  // Rail — dashed horizontal line (hidden behind wall)
   const fvHoleR  = +(10 * Sd).toFixed(2);
   const fvHoleCX = (fvTagX + tagW_svgA / 2).toFixed(1);
   const fvHoleCY = (fvTagY + 10 * Sd).toFixed(1);
   svg += `<line x1="${fvX}" y1="${fvHoleCY}" x2="${(fvX+tagW_svgA+6).toFixed(1)}" y2="${fvHoleCY}" stroke="#b0a090" stroke-width="0.8" stroke-dasharray="2,1.5"/>`;
   svg += `<text x="${(fvX+tagW_svgA+7).toFixed(1)}" y="${(+fvHoleCY+0.5).toFixed(1)}" font-family="monospace" font-size="1.4" fill="#b0a090">rail</text>`;
 
-  // Tag face plate — fully opaque, drawn on top of channel and rail (tag is in front)
+  // Tag face plate — fully opaque (in front)
   svg += `<rect x="${fvTagX.toFixed(1)}" y="${fvTagY.toFixed(1)}" width="${tagW_svgA.toFixed(1)}" height="${tagH_svgA.toFixed(1)}" fill="#c8d0d8" stroke="#9aabb8" stroke-width="0.5"/>`;
 
-  // Ø20mm hole in tag face — centered, 10mm from top
+  // Ø20mm hole in tag face
   svg += `<circle cx="${fvHoleCX}" cy="${fvHoleCY}" r="${fvHoleR}" fill="#0e0e0e" stroke="#8899aa" stroke-width="0.5"/>`;
 
-  // Arm dot — arm is perpendicular to wall face, appears end-on as a point
-  const fvArmR = +(3 * Sd).toFixed(2);
-  svg += `<circle cx="${fvHoleCX}" cy="${fvHoleCY}" r="${fvArmR}" fill="#c8d0d8" stroke="#9aabb8" stroke-width="0.4"/>`;
+  // Hex bolt head (inscribed in hole — locks tag on rail)
+  const hexR = +fvHoleR * 0.82;
+  const hexPts = Array.from({length:6}, (_,i) => {
+    const a = -Math.PI/6 + i * Math.PI/3;
+    return `${(+fvHoleCX + hexR*Math.cos(a)).toFixed(2)},${(+fvHoleCY + hexR*Math.sin(a)).toFixed(2)}`;
+  }).join(' ');
+  svg += `<polygon points="${hexPts}" fill="#8899aa" stroke="#ccc" stroke-width="0.4"/>`;
+  svg += `<circle cx="${fvHoleCX}" cy="${fvHoleCY}" r="${(hexR*0.32).toFixed(2)}" fill="#444" stroke="none"/>`; // centre recess
 
-  // Channel label
-  svg += `<text x="${(fvX+(tagW_svgA+6)/2).toFixed(1)}" y="${(chTY-2).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.5" fill="#555">channel</text>`;
+  // Security cap outline (snaps over hex — dashed = removable)
+  const capR = (+fvHoleR * 1.18).toFixed(2);
+  svg += `<circle cx="${fvHoleCX}" cy="${fvHoleCY}" r="${capR}" fill="none" stroke="#aaa" stroke-width="0.6" stroke-dasharray="1.5,1"/>`;
+  svg += `<text x="${(+fvHoleCX + +capR + 0.5).toFixed(1)}" y="${fvHoleCY}" font-family="monospace" font-size="1.3" fill="#888">cap</text>`;
 
-  // Hole dimension callout
+  // Channel / C-profile label
+  svg += `<text x="${(fvX+(tagW_svgA+6)/2).toFixed(1)}" y="${(chTY-2).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.5" fill="#555">C-profile channel</text>`;
+
+  // Hole + hex dimension callout
   svg += hDim(+fvHoleCX - +fvHoleR, +fvTagY - 4, +fvHoleCX + +fvHoleR, `Ø20mm`, 2);
   svg += `<text x="${fvHoleCX}" y="${(+fvTagY - 7).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.5" fill="#8899aa">hole</text>`;
 
   // Engraved name lines in visible area below channel
   const nameY0 = chBY + 4;
-  svg += `<line x1="${(fvTagX+2)}" y1="${nameY0.toFixed(1)}"   x2="${(fvTagX+tagW_svgA-2).toFixed(1)}" y2="${nameY0.toFixed(1)}"     stroke="#888" stroke-width="0.4"/>`;
-  svg += `<line x1="${(fvTagX+3)}" y1="${(nameY0+4).toFixed(1)}" x2="${(fvTagX+tagW_svgA-3).toFixed(1)}" y2="${(nameY0+4).toFixed(1)}" stroke="#777" stroke-width="0.3"/>`;
-  svg += `<line x1="${(fvTagX+4)}" y1="${(nameY0+8).toFixed(1)}" x2="${(fvTagX+tagW_svgA-4).toFixed(1)}" y2="${(nameY0+8).toFixed(1)}" stroke="#777" stroke-width="0.3"/>`;
+  svg += `<line x1="${(fvTagX+2)}"  y1="${nameY0.toFixed(1)}"     x2="${(fvTagX+tagW_svgA-2).toFixed(1)}" y2="${nameY0.toFixed(1)}"       stroke="#888" stroke-width="0.4"/>`;
+  svg += `<line x1="${(fvTagX+3)}"  y1="${(nameY0+4).toFixed(1)}" x2="${(fvTagX+tagW_svgA-3).toFixed(1)}" y2="${(nameY0+4).toFixed(1)}"   stroke="#777" stroke-width="0.3"/>`;
+  svg += `<line x1="${(fvTagX+4)}"  y1="${(nameY0+8).toFixed(1)}" x2="${(fvTagX+tagW_svgA-4).toFixed(1)}" y2="${(nameY0+8).toFixed(1)}"   stroke="#777" stroke-width="0.3"/>`;
 
   // Tag dimensions
   svg += hDim(fvTagX, fvTagY + tagH_svgA + 5, fvTagX + tagW_svgA, `${tagWmm}mm`);
   svg += vDim(fvTagX - 6, fvTagY, fvTagY + tagH_svgA, `${tagHmm}mm`, 3);
 
-  // Labels
-  svg += `<text x="${(fvX+(tagW_svgA+6)/2).toFixed(1)}" y="${(chTY-11).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.7" fill="#444">FRONT FACE VIEW</text>`;
+  svg += `<text x="${(fvX+(tagW_svgA+6)/2).toFixed(1)}" y="${(chTY-12).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.7" fill="#444">FRONT FACE VIEW</text>`;
   svg += `<text x="${(fvX+(tagW_svgA+6)/2).toFixed(1)}" y="${(tagBotYA+12).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.7" fill="#444">Tag face visible</text>`;
+  svg += `</g>`; // end drag-detailA
 
-  // Notes below both views
-  const aNotesY = Math.max(tagBotYA, fvTagY + tagH_svgA) + 16;
-  svg += `<text x="${dX}" y="${aNotesY}"    font-family="monospace" font-size="2" fill="#666">· ${rHeights.length} rails Ø16mm S.S. — recessed in wall channel, fully hidden from front</text>`;
-  svg += `<text x="${dX}" y="${aNotesY+5}"  font-family="monospace" font-size="2" fill="#666">· Tag Ø20mm captive hole slides onto rail — tamper-proof from public side</text>`;
-  svg += `<text x="${dX}" y="${aNotesY+10}" font-family="monospace" font-size="2" fill="#666">· Security Torx end cap: public cannot remove — maintenance slides tags off</text>`;
-  svg += `<text x="${dX}" y="${aNotesY+15}" font-family="monospace" font-size="2" fill="#666">· Brushed S.S. 316 throughout  ·  Tag: ${tagWmm}×${tagHmm}mm plate ~3mm thick</text>`;
+  // ── ARM VARIATION PANEL — all rails, side section view, Scale 1:5 (same as Detail A) ──
+  const avS      = 0.2;                  // Scale 1:5 — 1 SVG = 5mm
+  const avChDep2 = +(30 * avS).toFixed(2);
+  const avChH2   = +(35 * avS).toFixed(2);
+  const avRailR2 = +(8  * avS).toFixed(2);
+  const avTagLen = +(120 * avS).toFixed(1);
+  const avTagW2  = Math.max(0.7, 3 * avS);
+  const avAbove2 = avTagLen * (10/120);
+  const avBelow2 = avTagLen * (110/120);
+  const avArmMin = 22, avArmMax = 50;
+  const avN      = rHeights.length;
 
-  // ── TAG DISTRIBUTION DETAIL — live from actual tagLayout ──
-  const sdX = dX, sdY = aNotesY + 22;
+  const avX      = fvX + tagW_svgA + 18;   // always clears front face view
+  const avY      = dY + 2;
+  const avWallW  = 30;    // 150mm wall at 1:5 — same wall thickness as Detail A
+  const avFaceX  = avX + avWallW;
+  const avChL2   = avFaceX - +avChDep2;
+  const avRailX2 = avChL2 + +avChDep2 / 2;
+
+  // Vertical scale: proportional to actual rail band height, capped so panel ≤ 150 SVG
+  const avChH2num  = +avChH2;
+  const avMinH     = Math.min(...rHeights);
+  const avMaxH     = Math.max(...rHeights);
+  const avBandH    = Math.max(1, avMaxH - avMinH);
+  const avYscale   = avN <= 1 ? avS : Math.min(avS, 120 / avBandH);
+  const avPanelH   = avN <= 1 ? avTagLen + 12 : avBandH * avYscale + avTagLen + 8;
+  const avWallH    = avPanelH + avChH2num + 8;
+
+  // Rail Y positions: proportional to actual rHeights, highest rail at top
+  const avRailYs = rHeights.map(h =>
+    avN === 1
+      ? avY + 6 + avPanelH / 2
+      : avY + 6 + avAbove2 + (avMaxH - h) * avYscale
+  );
+
+  svg += `<g id="drag-armVar" transform="${off('armVar')}" cursor="move" style="cursor:move">`;
+  svg += `<text x="${avX}" y="${(avY - 2)}" font-family="monospace" font-size="1.7" fill="#444">ARM VARIATION  <tspan fill="#555">Scale 1:5</tspan></text>`;
+
+  // Brick hatch pattern for ARM VARIATION
+  svg += `<defs><pattern id="avhatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <rect width="4" height="4" fill="#2a2218"/>
+    <line x1="0" y1="0" x2="0" y2="4" stroke="#8a7a5a" stroke-width="1.2"/>
+  </pattern></defs>`;
+
+  // Wall base (dark)
+  svg += `<rect x="${avX}" y="${avY}" width="${avWallW}" height="${avWallH.toFixed(1)}" fill="#1a1008" stroke="#888" stroke-width="0.5"/>`;
+
+  // Brick courses: collect Y boundaries anchored to channel edges, draw hatched rects between them
+  const avBrickPx = (BRICK_H_MM + MORTAR_MM) * avS;
+  const avBrickLines = new Set();
+  avRailYs.forEach(ry => {
+    const te = ry - avChH2num / 2, be = ry + avChH2num / 2;
+    avBrickLines.add(+te.toFixed(2)); avBrickLines.add(+be.toFixed(2));
+    for (let cy = te - avBrickPx; cy >= avY - avBrickPx; cy -= avBrickPx) avBrickLines.add(+cy.toFixed(2));
+    for (let cy = be + avBrickPx; cy <= avY + avWallH + avBrickPx; cy += avBrickPx) avBrickLines.add(+cy.toFixed(2));
+  });
+  avBrickLines.add(+avY.toFixed(2));
+  avBrickLines.add(+(avY + avWallH).toFixed(2));
+  const avSortedLines = [...avBrickLines].sort((a, b) => a - b);
+  // Draw hatched brick rect for each band not inside a channel
+  for (let j = 0; j < avSortedLines.length - 1; j++) {
+    const y1 = avSortedLines[j], y2 = avSortedLines[j + 1];
+    if (y1 < avY || y2 > avY + avWallH) continue;
+    const mid = (y1 + y2) / 2;
+    const inChannel = avRailYs.some(ry => mid > ry - avChH2num / 2 && mid < ry + avChH2num / 2);
+    if (!inChannel) {
+      svg += `<rect x="${avX}" y="${y1.toFixed(2)}" width="${avWallW}" height="${(y2 - y1).toFixed(2)}" fill="url(#avhatch)" stroke="none"/>`;
+    }
+  }
+
+  // Channel cutouts with bright edges
+  avRailYs.forEach(ry => {
+    const chT = (ry - avChH2num/2).toFixed(1), chB = (ry + avChH2num/2).toFixed(1);
+    svg += `<rect x="${avChL2.toFixed(1)}" y="${chT}" width="${avChDep2}" height="${avChH2}" fill="#0a0a0a" stroke="none"/>`;
+    svg += `<line x1="${avChL2.toFixed(1)}" y1="${chT}" x2="${avFaceX}" y2="${chT}" stroke="#ccc" stroke-width="0.6"/>`;
+    svg += `<line x1="${avChL2.toFixed(1)}" y1="${chB}" x2="${avFaceX}" y2="${chB}" stroke="#ccc" stroke-width="0.6"/>`;
+    svg += `<line x1="${avChL2.toFixed(1)}" y1="${chT}" x2="${avChL2.toFixed(1)}" y2="${chB}" stroke="#ccc" stroke-width="0.4"/>`;
+  });
+
+  // Wall face line
+  svg += `<line x1="${avFaceX}" y1="${(avY-3).toFixed(1)}" x2="${avFaceX}" y2="${(avY+avWallH+2).toFixed(1)}" stroke="#ddd" stroke-width="0.9"/>`;
+  svg += `<text x="${(avFaceX+0.3).toFixed(1)}" y="${(avY-3.5).toFixed(1)}" font-family="monospace" font-size="1.4" fill="#39ff1470">face</text>`;
+
+  // Rails, arms, tags
+  avRailYs.forEach((ry, i) => {
+    const r      = i;              // rHeights[0]=lowest→bottom(short arm), rHeights[avN-1]=highest→top(long arm)
+    const armMm  = avN === 1 ? avArmMax : Math.round(avArmMin + r * (avArmMax - avArmMin) / (avN - 1));
+    const armSvg = armMm * avS;
+    const op     = 0.45 + r / Math.max(1, avN-1) * 0.55;
+    const hex    = Math.round(op*255).toString(16).padStart(2,'0');
+    const col    = `#c8d0d8${hex}`;
+
+    svg += `<circle cx="${avRailX2.toFixed(1)}" cy="${ry.toFixed(1)}" r="${avRailR2}" fill="#777" stroke="#ccc" stroke-width="0.5"/>`;
+    svg += `<line x1="${avFaceX}" y1="${ry.toFixed(1)}" x2="${(avFaceX+armSvg).toFixed(1)}" y2="${ry.toFixed(1)}" stroke="${col}" stroke-width="0.8" stroke-dasharray="1.5,1"/>`;
+    svg += `<rect x="${(avFaceX+armSvg-avTagW2/2).toFixed(2)}" y="${(ry-avAbove2).toFixed(1)}" width="${avTagW2.toFixed(2)}" height="${(avAbove2+avBelow2).toFixed(1)}" fill="#c8d0d8" fill-opacity="${(op*0.9).toFixed(2)}" stroke="#9aabb8" stroke-width="0.25"/>`;
+    svg += `<text x="${(avFaceX+armSvg/2).toFixed(1)}" y="${(ry-1.5).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.3" fill="#9aabb8">${armMm}mm</text>`;
+  });
+
+  // Dimension line
+  const avDimY = avY + avWallH + 4;
+  const avMaxX = avFaceX + avArmMax * avS;
+  svg += `<line x1="${avFaceX.toFixed(1)}" y1="${avDimY.toFixed(1)}" x2="${avMaxX.toFixed(1)}" y2="${avDimY.toFixed(1)}" stroke="#888" stroke-width="0.4" marker-start="url(#arrR)" marker-end="url(#arr)"/>`;
+  svg += `<text x="${((avFaceX+avMaxX)/2).toFixed(1)}" y="${(avDimY+4).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.5" fill="#888">${avArmMin}–${avArmMax}mm</text>`;
+
+  // Scale labels on each panel
+  svg += `<text x="${dX}" y="${(tagBotYA+5).toFixed(1)}" font-family="monospace" font-size="1.5" fill="#555">scale NTS  (~1:36)</text>`;
+  svg += `<text x="${((fvX+(tagW_svgA+6)/2)).toFixed(1)}" y="${(tagBotYA+5).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.5" fill="#555">NTS  (~1:36)</text>`;
+  svg += `<text x="${avX}" y="${(avY+avWallH+6).toFixed(1)}" font-family="monospace" font-size="1.5" fill="#555">Scale 1:5</text>`;
+  svg += `</g>`; // end drag-armVar
+
+  // Notes — directly below ARM VARIATION (tallest element in row)
+  // Notes must clear ALL row elements: Detail A, ARM VARIATION (incl. dim line + scale text), tag layout
+  const aNotesY = avY + avWallH + 18;
+  svg += `<g id="drag-notes" transform="${off('notes')}" cursor="move" style="cursor:move">`;
+  svg += `<text x="${dX}" y="${aNotesY}"    font-family="monospace" font-size="2" fill="#666">· Route channel between brick courses — min. 35mm(H) × 30mm(D) — confirm with Structural Engineer</text>`;
+  svg += `<text x="${dX}" y="${aNotesY+5}"  font-family="monospace" font-size="2" fill="#666">· Insert stainless steel 316 C-profile liner — fix with M8 chemical anchors — set depth before final fix</text>`;
+  svg += `<text x="${dX}" y="${aNotesY+10}" font-family="monospace" font-size="2" fill="#666">· Thread Ø16mm stainless steel 316 rail through C-profile — level ±1mm — secure ends with Torx end caps</text>`;
+  svg += `<text x="${dX}" y="${aNotesY+15}" font-family="monospace" font-size="2" fill="#666">· Slide tags onto rail from one end — Ø20mm hole / 3mm plate — lock M10 hex bolt — fit security cap</text>`;
+  svg += `<text x="${dX}" y="${aNotesY+20}" font-family="monospace" font-size="2" fill="#666">· All stainless steel 316 brushed finish — tag ${tagWmm}×${tagHmm}mm ~3mm — arm length varies per rail (wind chime effect)</text>`;
+  svg += `</g>`; // end drag-notes
+
+  // tableX defined here so TAG LAYOUT can use it (section schedule rendered later same row)
+  const tableX = dX + 170, tableY = dY;
+
+  // ── TAG LAYOUT DETAIL — 1.5m section, full wall height, same row as table ──
+  const sdX        = tableX + 90;   // right of section schedule
+  const sdY        = dY;
+  const showMm     = Math.min(1500, backWall.lengthM * 1000);
+  const wallHmm    = backWall.heightM * 1000;
+  const sdH        = avWallH;                               // match ARM VARIATION height
+  const scale2     = sdH / wallHmm;                         // Y scale from full height
+  const sdW        = Math.round(showMm * scale2);           // X width proportional
+  const toSvgY2    = (yMm) => sdY + sdH - yMm * scale2;
   const bandMinMm2 = Number(p.tagBandMinM) * 1000;
   const bandMaxMm2 = Number(p.tagBandMaxM) * 1000;
-  const bandRange2 = bandMaxMm2 - bandMinMm2;
-  const showMm    = Math.min(1500, backWall.lengthM * 1000);
-  const sdW       = 78;
-  // Uniform scale for both axes — tags render at correct 1:2 proportions
-  const scale2    = sdW / showMm;
-  const sdH       = Math.max(20, Math.round((bandRange2 + tagHmm * 1.5) * scale2));
-  const toSvgY2   = (yMm) => sdY + sdH - (yMm - bandMinMm2) * scale2;
-  const sliceTags = tagLayout.filter(t => t.xMm <= showMm);
-  // Y position is physically valid: rail height ± slot jitter (max ±20mm)
+  const sliceTags  = tagLayout.filter(t => t.xMm <= showMm);
 
-  svg += `<text x="${sdX}" y="${sdY-2}" font-family="monospace" font-size="2" font-weight="bold" fill="#aaa">TAG LAYOUT DETAIL — first ${(showMm/1000).toFixed(1)}m</text>`;
+  svg += `<g id="drag-tagLayout" transform="${off('tagLayout')}" cursor="move" style="cursor:move">`;
+  svg += `<text x="${sdX}" y="${sdY-4}" font-family="monospace" font-size="2.2" font-weight="bold" fill="#aaa">TAG LAYOUT — 1.5 m section  <tspan font-size="1.6" fill="#555">NTS · 1:${Math.round(wallHmm/sdH)}</tspan></text>`;
   svg += `<rect x="${sdX}" y="${sdY}" width="${sdW}" height="${sdH}" fill="#1a1a1a" stroke="#39ff1430" stroke-width="0.4"/>`;
 
-  // Actual rails at their real heights
+  // Tag band zone highlight
+  const bandTopSvg = toSvgY2(bandMaxMm2), bandBotSvg = toSvgY2(bandMinMm2);
+  svg += `<rect x="${sdX}" y="${bandTopSvg.toFixed(1)}" width="${sdW}" height="${(bandBotSvg-bandTopSvg).toFixed(1)}" fill="#39ff1408" stroke="none"/>`;
+
+  // Rail lines
   rHeights.forEach((rMm, i) => {
     const ry = toSvgY2(rMm).toFixed(1);
-    svg += `<line x1="${sdX}" y1="${ry}" x2="${sdX+sdW}" y2="${ry}" stroke="#39ff1438" stroke-width="0.6" stroke-dasharray="3,3"/>`;
-    svg += `<text x="${sdX+sdW+1}" y="${(+ry + 0.7).toFixed(1)}" font-family="monospace" font-size="1.6" fill="#39ff1460">R${i+1}</text>`;
+    svg += `<line x1="${sdX}" y1="${ry}" x2="${sdX+sdW}" y2="${ry}" stroke="#39ff1445" stroke-width="0.6" stroke-dasharray="3,3"/>`;
+    svg += `<text x="${sdX+sdW+1}" y="${(+ry+0.7).toFixed(1)}" font-family="monospace" font-size="1.6" fill="#39ff1470">R${i+1}</text>`;
   });
 
-  // Actual tags from tagLayout — snapped to nearest rail, correct proportions
-  const tWd = tagWmm * scale2;
-  const tHd = tagHmm * scale2;
+  // Tags
+  const tWd = Math.max(0.5, tagWmm * scale2);
+  const tHd = Math.max(0.8, tagHmm * scale2);
   sliceTags.forEach(t => {
     const tx = (sdX + t.xMm * scale2).toFixed(1);
-    // t.yMm = tag bottom; tag top = t.yMm + t.hMm = rail height → align with rail line
     const ty = toSvgY2(t.yMm + t.hMm).toFixed(1);
-    svg += `<rect x="${tx}" y="${ty}" width="${tWd.toFixed(2)}" height="${tHd.toFixed(2)}" fill="#c8d0d8" fill-opacity="0.88" stroke="#8899aa" stroke-width="0.2"/>`;
+    svg += `<rect x="${tx}" y="${ty}" width="${tWd.toFixed(2)}" height="${tHd.toFixed(2)}" fill="#c8d0d8" fill-opacity="0.88" stroke="#8899aa" stroke-width="0.15"/>`;
   });
 
-  svg += `<text x="${sdX}" y="${sdY+sdH+5}" font-family="monospace" font-size="1.8" fill="#555">All tags on rails — layout updates live.</text>`;
+  svg += `<text x="${sdX}" y="${sdY+sdH+5}" font-family="monospace" font-size="1.6" fill="#555">${(wallHmm/1000).toFixed(1)}m wall height · ${sliceTags.length} tags · live</text>`;
+  svg += `</g>`; // end drag-tagLayout
 
   // Back wall summary note
   svg += `<text x="${bX0}" y="${bY0+bH+14}" font-family="monospace" font-size="2.2" fill="#39ff1255">RAIL SYSTEM: ${rHeights.length} rods at h=${rHeights.map(h=>Math.round(h)+'mm').join(' / ')} · Ø16mm S.S. round bar recessed in wall channel · Rail fully hidden from front · see Detail below</text>`;
@@ -955,143 +1128,11 @@ function constructionDrawingSvg(backWall, frontWall, p, tagLayout = []) {
   svg += `<text x="${fX0}" y="${fY0+fH+20}" font-family="monospace" font-size="3.5" font-weight="bold" fill="#39ff14">FRONT WALL — bricks only</text>`;
 
   // ── DETAIL STRIP (below front wall) ──
-  const detY = fY0 + fH + 38;
-  svg += `<line x1="${margin-5}" y1="${detY-12}" x2="${totalW-margin+5}" y2="${detY-12}" stroke="#39ff1430" stroke-width="0.4" stroke-dasharray="3,3"/>`;
-  svg += `<text x="${margin}" y="${detY-6}" font-family="monospace" font-size="3" font-weight="bold" fill="#39ff1488">DETAILS — RAIL IN CHANNEL SYSTEM + SECTION SCHEDULE</text>`;
+  svg += `<line x1="${margin-5}" y1="${dY-14}" x2="${totalW-margin+5}" y2="${dY-14}" stroke="#39ff1430" stroke-width="0.4" stroke-dasharray="3,3"/>`;
+  svg += `<text x="${margin}" y="${dY-7}" font-family="monospace" font-size="3" font-weight="bold" fill="#39ff1488">DETAILS — RAIL IN CHANNEL SYSTEM + SECTION SCHEDULE</text>`;
 
-  const csX = margin, csY = detY + 10;
-
-  // ── DETAIL: Vertical section through wall at rail height (NTS) ──
-  // Axes: horizontal = wall depth (left=back, right=front face); vertical = height
-  // Scale approx 1:8 (1 SVG unit ≈ 8mm)
-  svg += `<text x="${csX}" y="${csY-3}" font-family="monospace" font-size="2.5" font-weight="bold" fill="#aaa">DETAIL  Vertical Section at Rail  NTS</text>`;
-
-  const wFace  = csX + 22;  // wall face x — kept narrow so space in front is visible
-  const chDep  = 8;         // channel depth into wall (≈30mm at this scale)
-  const chTop  = csY + 6;   // channel top y
-  const chBot  = csY + 18;  // channel bottom y (~35mm tall)
-  const chLeft = wFace - chDep;
-  const railR  = 2.5;       // Ø16mm radius at this scale
-  const railCX = chLeft + railR + 1;
-  const railCY = (chTop + chBot) / 2;
-
-  // Wall body — diagonal masonry hatch
-  svg += `<defs><pattern id="vsec" width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-    <line x1="0" y1="0" x2="0" y2="3" stroke="#555" stroke-width="0.7"/>
-  </pattern></defs>`;
-  // Wall above channel
-  svg += `<rect x="${csX}" y="${csY}" width="${wFace - csX}" height="${chTop - csY}" fill="url(#vsec)" stroke="none"/>`;
-  // Wall below channel
-  svg += `<rect x="${csX}" y="${chBot}" width="${wFace - csX}" height="${csY + 70 - chBot}" fill="url(#vsec)" stroke="none"/>`;
-  // Wall behind channel (back portion)
-  svg += `<rect x="${csX}" y="${chTop}" width="${chLeft - csX}" height="${chBot - chTop}" fill="url(#vsec)" stroke="none"/>`;
-  // Outer wall outline
-  svg += `<rect x="${csX}" y="${csY}" width="${wFace - csX}" height="70" fill="none" stroke="#999" stroke-width="0.6"/>`;
-
-  // Channel void (open to front)
-  svg += `<rect x="${chLeft}" y="${chTop}" width="${chDep}" height="${chBot - chTop}" fill="#0e0e0e" stroke="none"/>`;
-  // Channel outline
-  svg += `<line x1="${chLeft}" y1="${chTop}" x2="${wFace}" y2="${chTop}" stroke="#ccc" stroke-width="0.7"/>`;
-  svg += `<line x1="${chLeft}" y1="${chBot}" x2="${wFace}" y2="${chBot}" stroke="#ccc" stroke-width="0.7"/>`;
-  svg += `<line x1="${chLeft}" y1="${chTop}" x2="${chLeft}" y2="${chBot}" stroke="#ccc" stroke-width="0.5"/>`;
-
-  // Rail (circle — cross section of round rod inside channel)
-  svg += `<circle cx="${railCX}" cy="${railCY}" r="${railR}" fill="#777" stroke="#ccc" stroke-width="0.6"/>`;
-
-  // Tags hang IN FRONT of wall face.
-  // Hole at tag-top reaches into channel to grip rail; plate hangs outside.
-  // Each tag tilts to a different forward angle → depth varies → wind sound.
-  // Tinted air-space in front of wall — makes tags clearly visible outside
-  svg += `<rect x="${wFace}" y="${csY-2}" width="55" height="74" fill="#ffffff08" stroke="none"/>`;
-
-  const tagW2  = 2.2;
-  const tagLen = 48;  // SVG ≈ 120mm tag height
-  const tagTilts = [5, 20, 35];  // steeper tilt angles so depth variation is obvious
-  const tagFills = ['#c8d0d8bb', '#c8d0d8ff', '#c8d0d877'];
-
-  // Arms of different lengths: each tag's hole sits at a slightly different depth
-  const tagArmEnds = [wFace + 1, wFace + 5, wFace + 10];
-
-  tagTilts.forEach((deg, i) => {
-    const rad     = deg * Math.PI / 180;
-    const plateX  = tagArmEnds[i];  // arm connects at hole: 10mm from tag top
-    const above   = tagLen * (10 / 120);   // 10mm portion above arm (same as Detail A)
-    const below   = tagLen * (110 / 120);  // 110mm portion below arm
-    const x1 = (plateX - Math.sin(rad) * above).toFixed(1);
-    const y1 = (railCY  - Math.cos(rad) * above).toFixed(1);
-    const x2 = (plateX + Math.sin(rad) * below).toFixed(1);
-    const y2 = (railCY  + Math.cos(rad) * below).toFixed(1);
-    // Dashed arm: rail inside channel → hole (10mm from tag top)
-    svg += `<line x1="${railCX}" y1="${railCY}" x2="${plateX}" y2="${railCY}" stroke="${tagFills[i]}" stroke-width="0.7" stroke-dasharray="1.5,1"/>`;
-    // Tag plate: mostly below arm, 10mm above — matching Detail A
-    svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${tagFills[i]}" stroke-width="${tagW2}" stroke-linecap="round"/>`;
-  });
-
-  // Rail + hole redrawn on top
-  svg += `<circle cx="${railCX}" cy="${railCY}" r="${railR}" fill="#777" stroke="#ccc" stroke-width="0.6"/>`;
-  svg += `<circle cx="${railCX}" cy="${railCY}" r="1.8" fill="#0e0e0e" stroke="#9aabb8" stroke-width="0.4"/>`;
-
-  // Depth-range annotation at tag tips (tips = arm + 110mm below)
-  const below2   = tagLen * (110 / 120);
-  const depTip1X = tagArmEnds[0] + Math.sin( 5 * Math.PI/180) * below2;
-  const depTip3X = tagArmEnds[2] + Math.sin(35 * Math.PI/180) * below2;
-  const depY     = railCY + Math.cos(20 * Math.PI/180) * below2 + 4;
-  svg += `<line x1="${depTip1X.toFixed(1)}" y1="${depY.toFixed(1)}" x2="${depTip3X.toFixed(1)}" y2="${depY.toFixed(1)}" stroke="#ccc" stroke-width="0.4" marker-start="url(#arrR)" marker-end="url(#arr)"/>`;
-  svg += `<text x="${((depTip1X+depTip3X)/2).toFixed(1)}" y="${(depY+4).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.8" fill="#ddd">depth varies</text>`;
-  svg += `<text x="${((depTip1X+depTip3X)/2).toFixed(1)}" y="${(depY+8).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="1.6" fill="#555">tags brush → sound</text>`;
-
-  // Wall face line
-  svg += `<line x1="${wFace}" y1="${csY-2}" x2="${wFace}" y2="${csY+72}" stroke="#ddd" stroke-width="1.2"/>`;
-
-  // Labels
-  svg += `<text x="${wFace+2}" y="${csY+3}" font-family="monospace" font-size="2" fill="#39ff1480">→ front</text>`;
-  svg += `<text x="${csX+1}" y="${csY+75}" font-family="monospace" font-size="1.8" fill="#555">← back of wall</text>`;
-
-  // Dimensions
-  svg += `<line x1="${chLeft}" y1="${chBot+6}" x2="${wFace}" y2="${chBot+6}" stroke="#ccc" stroke-width="0.4" marker-start="url(#arrR)" marker-end="url(#arr)"/>`;
-  svg += `<text x="${(chLeft+wFace)/2}" y="${chBot+11}" text-anchor="middle" font-family="monospace" font-size="2" fill="#ddd">~30mm</text>`;
-  svg += vDim(chLeft - 6, chTop, chBot, `~35mm`, 4);
-  svg += vDim(wFace + 2, railCY, railCY + tagLen, `${tagHmm}mm`, 4);
-
-  // Rail label
-  svg += `<text x="${railCX - railR - 1}" y="${railCY - railR - 1.5}" text-anchor="end" font-family="monospace" font-size="1.8" fill="#aaa">Ø16mm rail</text>`;
-
-  // Notes
-  const nY = csY + 80;
-  svg += `<text x="${csX}" y="${nY}"    font-family="monospace" font-size="2" fill="#666">· Channel ~30×35mm routed into brick face — rail Ø16mm S.S. fully hidden inside</text>`;
-  svg += `<text x="${csX}" y="${nY+5}" font-family="monospace" font-size="2" fill="#666">· Tags hang on wall surface — hole at top attaches to rail from outside (front)</text>`;
-  svg += `<text x="${csX}" y="${nY+10}" font-family="monospace" font-size="2" fill="#666">· Each tag can rest at a different forward depth — variable tilt around rail axis</text>`;
-  svg += `<text x="${csX}" y="${nY+15}" font-family="monospace" font-size="2" fill="#666">· Adjacent tags brush in wind → gentle sound effect (wind chime principle)</text>`;
-
-  // ── FRONT ELEVATION FRAGMENT ──
-  const hdX = csX + 85, hdY = csY;
-  svg += `<text x="${hdX}" y="${hdY-3}" font-family="monospace" font-size="2.5" font-weight="bold" fill="#aaa">FRONT ELEVATION (fragment)</text>`;
-  // Wall background
-  svg += `<rect x="${hdX}" y="${hdY}" width="48" height="70" fill="#1c1c1c" stroke="#39ff1430" stroke-width="0.4"/>`;
-  // Render actual tag layout — first 1500mm fragment scaled to panel
-  const fvFragMm  = 1500;
-  const fvWallHmm = backWall.heightM * 1000;
-  const fvSX = 48 / fvFragMm;
-  const fvSY = 70 / fvWallHmm;
-  // Rail lines (hidden in channel — dashed)
-  for (const rh of rHeights) {
-    const ry = (hdY + (fvWallHmm - rh) * fvSY).toFixed(1);
-    svg += `<line x1="${hdX}" y1="${ry}" x2="${hdX+48}" y2="${ry}" stroke="#444" stroke-width="0.5" stroke-dasharray="2,2"/>`;
-  }
-  // Actual tags from layout (first 1500mm)
-  for (const t of tagLayout) {
-    if (t.xMm > fvFragMm) continue;
-    const tx = (hdX + t.xMm * fvSX).toFixed(1);
-    const ty = (hdY + (fvWallHmm - t.yMm - t.hMm) * fvSY).toFixed(1);
-    const tw = Math.max(0.5, (t.wMm * fvSX).toFixed(2));
-    const th = Math.max(0.8, (t.hMm * fvSY).toFixed(2));
-    svg += `<rect x="${tx}" y="${ty}" width="${tw}" height="${th}" fill="#c8d0d8" fill-opacity="0.9" stroke="#8899aa" stroke-width="0.2"/>`;
-  }
-  svg += `<text x="${hdX+24}" y="${hdY+76}" text-anchor="middle" font-family="monospace" font-size="2" fill="#555">first 1.5 m — actual layout</text>`;
-  svg += `<text x="${hdX+24}" y="${hdY+81}" text-anchor="middle" font-family="monospace" font-size="2" fill="#555">Rail hidden in channel · only tag face visible</text>`;
-
-  // ── SECTION SCHEDULE ──
-  const tableX = hdX + 62, tableY = csY;
+  // ── SECTION SCHEDULE — right of ARM VARIATION ──
+  svg += `<g id="drag-schedule" transform="${off('schedule')}" cursor="move" style="cursor:move">`;
   svg += `<text x="${tableX}" y="${tableY-3}" font-family="monospace" font-size="2.5" font-weight="bold" fill="#aaa">SECTION SCHEDULE</text>`;
   const tCols = [0, 20, 42, 60];
   const headers = ["SEC", "RANGE", "TAGS", "TAGS/RAIL"];
@@ -1115,9 +1156,10 @@ function constructionDrawingSvg(backWall, frontWall, p, tagLayout = []) {
   [`TOTAL`, `${backWall.lengthM.toFixed(0)} m`, `${tagLayout.length}`, `~${rHeights.length > 0 ? Math.round(tagLayout.length / rHeights.length) : "—"}`].forEach((d, i) => {
     svg += `<text x="${tableX+tCols[i]+1}" y="${totY}" font-family="monospace" font-size="2" font-weight="bold" fill="#39ff14">${d}</text>`;
   });
+  svg += `</g>`; // end drag-schedule
 
   // ── OPTIONS STRIP: 3 rail visibility options ──
-  const optY = fY0 + fH + detailH + 55;
+  const optY = aNotesY + 50;
   svg += `<line x1="${margin-5}" y1="${optY-12}" x2="${totalW-margin+5}" y2="${optY-12}" stroke="#39ff1430" stroke-width="0.4" stroke-dasharray="3,3"/>`;
   svg += `<text x="${margin}" y="${optY-8}" font-family="monospace" font-size="3" font-weight="bold" fill="#39ff1488">RAIL VISIBILITY OPTIONS</text>`;
   svg += `<text x="${margin}" y="${optY-3}" font-family="monospace" font-size="2" fill="#39ff1450">Vertical section through wall at rail — schematic, NTS</text>`;
@@ -1191,36 +1233,39 @@ function constructionDrawingSvg(backWall, frontWall, p, tagLayout = []) {
   const opBase = optY + 5;
   const opGap  = 100;
 
+  // Scale for drawOption panels: wallW=26 represents 150mm wall → 1 SVG unit ≈ 5.77mm
+  const doScale = 26 / 150;
+  const doArm1 = +((avArmMin + avArmMax) / 2 * doScale).toFixed(1); // surface: mid arm
+  const doArm2 = +(avArmMin * doScale).toFixed(1);                  // channel: shortest (22mm)
+  const doArm3 = +(avArmMax * doScale).toFixed(1);                  // standoff: longest (50mm)
+  const doChD  = +(30 * doScale).toFixed(1);                        // channel depth: 30mm
+
   // Option 1: Rail on wall face — tag hangs in front
   drawOption(margin, opBase, 1, "Rail on wall face — tag hangs in front",
-    0,   // railOffsetX: rail ON wall face
-    6,   // armLen: arm extends 6 units in front
-    0, 0,
-    ["· Rail surface-mounted on face", "· Tag hangs ~20mm in front", "· Rail line visible above tags", "· Simplest to install"]
+    0, doArm1, 0, 0,
+    [`· Rail surface-mounted on face`, `· Tag arm ~${Math.round((avArmMin+avArmMax)/2)}mm in front`, "· Rail line visible above tags", "· Simplest to install"]
   );
 
   // Option 2: Rail recessed in channel — fully hidden
   drawOption(margin + opGap, opBase, 2, "Rail in wall channel — fully hidden",
-    -5,  // railOffsetX: rail inside channel
-    4,   // armLen: arm exits channel to just in front of face
-    8, 0,
-    ["· Channel ~30mm routed in brick", "· Rail completely hidden from front", "· Only tag face visible", "· More masonry work required"]
+    -doChD/2, doArm2, doChD, 0,
+    [`· Channel 30mm(D)×35mm(H) in brick`, "· Rail completely hidden from front", `· Min arm ${avArmMin}mm — tag close to wall`, "· More masonry work required"]
   );
 
   // Option 3: Rail on standoff — tag floats, rail behind
   drawOption(margin + opGap*2, opBase, 3, "Rail on standoff — tag floats, rail behind",
-    8,   // railOffsetX: rail at standoff end
-    14,  // armLen: arm extends further in front
-    0, 8,
-    ["· 25–30mm standoff bracket", "· Rail hidden behind tag bodies", "· Tags 'float' from wall — shadow line", "· Most three-dimensional look"]
+    8, doArm3, 0, 8,
+    ["· 25–30mm standoff bracket", "· Rail hidden behind tag bodies", `· Max arm ${avArmMax}mm — tags 'float'`, "· Most three-dimensional look"]
   );
 
   // ── SCALE BAR ──
-  const sbX = margin, sbY = totalH - 7;
+  const sbX = margin, sbY = optY + 120;
   svg += `<rect x="${sbX}" y="${sbY-2}" width="${5*SC}" height="2.5" fill="#444"/>`;
   svg += `<text x="${sbX}" y="${sbY+3}" font-family="monospace" font-size="2.5" fill="#aaa">0</text>`;
   svg += `<text x="${sbX+5*SC}" y="${sbY+3}" font-family="monospace" font-size="2.5" fill="#aaa">5 m   scale 1:100</text>`;
 
+  const totalH = sbY + 15;
+  const displayH = Math.round(totalH * displayW / totalW);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${displayW}" height="${displayH}" viewBox="0 0 ${totalW} ${totalH}">
   ${defs}${svg}
@@ -1316,6 +1361,53 @@ function generateDxf(backWall, frontWall, tagLayout, p) {
 }
 
 /* -----------------------
+   Text overflow detection — Arial glyph widths at 1000 units/em
+------------------------ */
+const ARIAL_WIDTHS = {
+  ' ':278,'!':278,'"':355,'#':556,'$':556,'%':889,'&':667,"'":191,
+  '(':333,')':333,'*':389,'+':584,',':278,'-':333,'.':278,'/':278,
+  '0':556,'1':556,'2':556,'3':556,'4':556,'5':556,'6':556,'7':556,
+  '8':556,'9':556,':':278,';':278,'<':584,'=':584,'>':584,'?':556,
+  '@':1015,'A':667,'B':667,'C':722,'D':722,'E':667,'F':611,'G':778,
+  'H':722,'I':278,'J':500,'K':667,'L':556,'M':833,'N':722,'O':778,
+  'P':611,'Q':778,'R':667,'S':556,'T':611,'U':722,'V':667,'W':944,
+  'X':667,'Y':611,'Z':611,
+  'a':556,'b':556,'c':500,'d':556,'e':556,'f':278,'g':556,'h':556,
+  'i':222,'j':222,'k':500,'l':222,'m':833,'n':556,'o':556,'p':556,
+  'q':556,'r':333,'s':500,'t':278,'u':556,'v':500,'w':722,'x':500,
+  'y':500,'z':500,
+  'Ä':667,'Ö':778,'Ü':722,'ä':556,'ö':556,'ü':556,'ß':611,
+  'é':556,'è':556,'ê':556,'á':556,'à':556,'â':556,'ó':556,'ò':556,
+  'ô':556,'ú':556,'ù':556,'û':556,'ñ':556,'ç':500,'í':222,'ì':222,
+  'î':278,'ý':500,'ž':500,'š':500,'č':500,'ř':333,'ě':556,'ň':556,
+};
+
+function arialTextWidthMm(str, fontSizeMm, bold = false) {
+  let total = 0;
+  for (const ch of str) total += (ARIAL_WIDTHS[ch] ?? 556);
+  return (total / 1000) * fontSizeMm * (bold ? 1.05 : 1.0);
+}
+
+// Returns array of { field, value, widthMm } for fields that overflow the tag
+function tagOverflowFields(victim, p) {
+  const W  = Number(p.tagWmm) || 60;
+  const H  = Number(p.tagHmm) || 120;
+  const sx = W / 60, sy = H / 120;
+  const sc = Math.min(sx, sy);
+  const avail = (57 - 3) * sx - 4; // inner text area minus 2mm margin each side
+  const checks = [
+    { field: "VORNAME",    value: (victim.first      || "").trim(), fontSize: 5.5 * sc, bold: false },
+    { field: "NACHNAME",   value: (victim.last        || "").trim(), fontSize: 8   * sc, bold: true  },
+    { field: "GEBURTSORT", value: (victim.birthPlace  || "").trim(), fontSize: 5   * sc, bold: false },
+    { field: "WOHNORT",    value: (victim.residence   || "").trim(), fontSize: 5   * sc, bold: false },
+  ];
+  return checks
+    .filter(c => c.value)
+    .map(c => ({ ...c, widthMm: arialTextWidthMm(c.value, c.fontSize, c.bold) }))
+    .filter(c => c.widthMm > avail);
+}
+
+/* -----------------------
    Per-tag SVG — luggage tag design (portrait)
    preview: { w, h } in px  →  tooltip/inline display
    without preview: uses mm units for print export
@@ -1344,15 +1436,33 @@ function tagSvg(victim, p, preview = null) {
   const ch = (8 * Math.min(sx, sy)).toFixed(2);
   const tagPath = `M ${ch},0 L ${(W - +ch).toFixed(2)},0 L ${W},${ch} L ${W},${H} L 0,${H} L 0,${ch} Z`;
 
+  // SVG units = mm (viewBox matches physical mm dimensions)
+  // When autoFitText is on, scale down font size so text fits within the inner text box
+  const sc = Math.min(sx, sy);
+  const textBoxW = (57 - 3) * sx; // px(57) - px(3) in SVG units
+  const MIN_FS = 2.8 * sc;        // never go smaller than label font size
+
+  function fittedFs(value, refSize, bold) {
+    const fsMm = refSize * sc; // nominal font size in mm (= SVG units)
+    if (!p.autoFitText || !value) return fsMm.toFixed(2);
+    const rawW = arialTextWidthMm(value, fsMm, bold);
+    if (rawW <= textBoxW) return fsMm.toFixed(2);
+    const fitted = Math.max(MIN_FS, fsMm * textBoxW / rawW * 0.97);
+    return fitted.toFixed(2);
+  }
+
   // One field: value above line, label below
-  const field = (label, value, lineY, valueY, labelY, fontSize, bold = false) =>
-    `<text x="${cx}" y="${py(valueY)}" text-anchor="middle" dominant-baseline="auto" ` +
-    `font-family="Arial,Helvetica,sans-serif" font-size="${pf(fontSize)}" ` +
-    (bold ? 'font-weight="bold" ' : '') +
-    `fill="black">${value}</text>` +
-    `<line x1="${px(3)}" y1="${py(lineY)}" x2="${px(57)}" y2="${py(lineY)}" stroke="black" stroke-width="0.3"/>` +
-    `<text x="${px(3)}" y="${py(labelY)}" font-family="Arial,Helvetica,sans-serif" ` +
-    `font-size="${pf(2.8)}" fill="#444" letter-spacing="0.2">${label}</text>`;
+  // fontSize is now passed as a pre-computed SVG-unit string via fittedFs()
+  const field = (label, value, lineY, valueY, labelY, refSize, bold = false) => {
+    const fs = fittedFs(value, refSize, bold);
+    return `<text x="${cx}" y="${py(valueY)}" text-anchor="middle" dominant-baseline="auto" ` +
+      `font-family="Arial,Helvetica,sans-serif" font-size="${fs}" ` +
+      (bold ? 'font-weight="bold" ' : '') +
+      `fill="black">${value}</text>` +
+      `<line x1="${px(3)}" y1="${py(lineY)}" x2="${px(57)}" y2="${py(lineY)}" stroke="black" stroke-width="0.3"/>` +
+      `<text x="${px(3)}" y="${py(labelY)}" font-family="Arial,Helvetica,sans-serif" ` +
+      `font-size="${pf(2.8)}" fill="#444" letter-spacing="0.2">${label}</text>`;
+  };
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${wAttr}" height="${hAttr}" viewBox="0 0 ${W} ${H}">
@@ -1381,10 +1491,55 @@ export default function App() {
   const [colorOverrides, setColorOverrides] = useState(new Map());
   const [hoveredVictim,  setHoveredVictim]  = useState(null);
   const [pdfBusy,        setPdfBusy]        = useState(false);
+  const [zipBusy,        setZipBusy]        = useState(false);
   const [tooltipPos,     setTooltipPos]     = useState({ x: 0, y: 0 });
   const previewWinRef = useRef(null);
   const [previewWinOpen, setPreviewWinOpen] = useState(false);
   const [previewNudges, setPreviewNudges] = useState([]);
+  const [dragOffsets, setDragOffsets] = useState({ detailA:{x:0,y:0}, armVar:{x:0,y:0}, notes:{x:0,y:0}, schedule:{x:0,y:0}, tagLayout:{x:0,y:0} });
+  const constructionRef = useRef(null);
+
+  useEffect(() => {
+    const container = constructionRef.current;
+    if (!container) return;
+    let drag = null;
+    const onDown = (e) => {
+      const g = e.target.closest('[id^="drag-"]');
+      if (!g) return;
+      e.preventDefault();
+      const key = g.id.replace('drag-', '');
+      const svgEl = container.querySelector('svg');
+      const rect = svgEl.getBoundingClientRect();
+      const vb = svgEl.viewBox.baseVal;
+      const sx = vb.width / rect.width;
+      const sy = vb.height / rect.height;
+      const base = dragOffsets[key] || { x: 0, y: 0 };
+      drag = { g, key, sx, sy, mx0: e.clientX * sx, my0: e.clientY * sy, bx: base.x, by: base.y };
+    };
+    const onMove = (e) => {
+      if (!drag) return;
+      const dx = e.clientX * drag.sx - drag.mx0;
+      const dy = e.clientY * drag.sy - drag.my0;
+      drag.g.setAttribute('transform', `translate(${(drag.bx + dx).toFixed(2)},${(drag.by + dy).toFixed(2)})`);
+    };
+    const onUp = (e) => {
+      if (!drag) return;
+      const dx = e.clientX * drag.sx - drag.mx0;
+      const dy = e.clientY * drag.sy - drag.my0;
+      const key = drag.key;
+      const newX = drag.bx + dx, newY = drag.by + dy;
+      setDragOffsets(prev => ({ ...prev, [key]: { x: newX, y: newY } }));
+      drag = null;
+    };
+    container.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      container.removeEventListener('mousedown', onDown);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [constructionRef.current, dragOffsets]);
 
   async function handleCsv(file) {
     const text   = await file.text();
@@ -1434,7 +1589,7 @@ export default function App() {
   const backWallSvg     = useMemo(() => backBricks  ? backWallPreviewSvg(backBricks, adjustedTagLayout, previewRailHeights) : "", [backBricks, adjustedTagLayout, previewRailHeights]);
   const frontWallSvg    = useMemo(() => frontBricks ? frontWallPreviewSvg(frontBricks, p.bushHammer) : "", [frontBricks, p.bushHammer]);
   const axoSvg          = useMemo(() => frontBricks ? wallAxonometricSvg(frontBricks, p.bushHammer, Number(p.axoProtrusion) || 380, Number(p.seed) || 1) : "", [frontBricks, p.bushHammer, p.axoProtrusion, p.seed]);
-  const constructionSvg = useMemo(() => constructionDrawingSvg(backWall, frontWall, p, adjustedTagLayout), [backWall, frontWall, p, adjustedTagLayout]);
+  const constructionSvg = useMemo(() => constructionDrawingSvg(backWall, frontWall, p, adjustedTagLayout, dragOffsets), [backWall, frontWall, p, adjustedTagLayout, dragOffsets]);
   const dxfContent      = useMemo(() => generateDxf(backWall, frontWall, adjustedTagLayout, p), [backWall, frontWall, adjustedTagLayout, p]);
 
   const victimByName = useMemo(
@@ -1459,14 +1614,136 @@ export default function App() {
   function handleWallMouseLeave() { setHoveredVictim(null); }
 
   async function downloadTagSvgs() {
-    const zip = new JSZip();
-    const keyToVictim = new Map(victims.map(v => [`${v.last}, ${v.first}`, v]));
-    adjustedTagLayout.forEach(t => {
-      const v    = keyToVictim.get(t.name) || {};
-      const safe = t.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_").replaceAll(/^_+|_+$/g, "").slice(0, 80);
-      zip.file(`${String(t.index + 1).padStart(4, "0")}_${safe}.svg`, tagSvg(v, p));
+    if (zipBusy) return;
+    setZipBusy(true);
+    try {
+      const zip = new JSZip();
+      const keyToVictim = new Map(victims.map(v => [`${v.last}, ${v.first}`, v]));
+      adjustedTagLayout.forEach(t => {
+        const v    = keyToVictim.get(t.name) || {};
+        const safe = t.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_").replaceAll(/^_+|_+$/g, "").slice(0, 80);
+        zip.file(`${String(t.index + 1).padStart(4, "0")}_${safe}.svg`, tagSvg(v, p));
+      });
+      triggerDownload(await zip.generateAsync({ type: "blob" }), "tags.zip");
+    } catch (err) {
+      alert("ZIP error: " + err.message);
+    } finally {
+      setZipBusy(false);
+    }
+  }
+
+  async function downloadOverflowTagSvgs() {
+    if (!overflowVictims.length) return;
+    try {
+      const zip = new JSZip();
+      overflowVictims.forEach((v, i) => {
+        const name = `${v.last}, ${v.first}`;
+        const safe = name.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_").replaceAll(/^_+|_+$/g, "").slice(0, 80);
+        zip.file(`${String(i + 1).padStart(4, "0")}_${safe}.svg`, tagSvg(v, p));
+      });
+      triggerDownload(await zip.generateAsync({ type: "blob" }), "overflow_tags.zip");
+    } catch (err) {
+      alert("ZIP error: " + err.message);
+    }
+  }
+
+  // Render an SVG string to a canvas at exactly wPx×hPx — canvas size is always bounded by caller
+  async function renderSvgToCanvas(svgStr, wPx, hPx, bg = '#0e0e0e') {
+    const canvas = document.createElement('canvas');
+    canvas.width = wPx; canvas.height = hPx;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, wPx, hPx);
+    const url = URL.createObjectURL(new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' }));
+    await new Promise((res, rej) => {
+      const img = new Image();
+      img.onload = () => { ctx.drawImage(img, 0, 0, wPx, hPx); URL.revokeObjectURL(url); res(); };
+      img.onerror = rej; img.src = url;
     });
-    saveAs(await zip.generateAsync({ type: "blob" }), "tags.zip");
+    return canvas;
+  }
+
+  // Export three separate PDFs: wall_drawings.pdf, detail_drawing.pdf, tags.pdf
+  async function downloadEverythingBatched() {
+    if (!victims.length) return;
+
+    // Drawings: open same print window as the vector print button
+    const entries = [
+      { svg: backWallSvg,     title: "BACK WALL ELEVATION" },
+      { svg: frontWallSvg,    title: "FRONT WALL ELEVATION" },
+      { svg: axoSvg,          title: "AXONOMETRIC VIEW" },
+      { svg: constructionSvg, title: "CONSTRUCTION DETAIL — 1:100" },
+    ].filter(e => e.svg);
+    if (entries.length) {
+      const dateStr = new Date().toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
+      const pages = entries.map((e, i) => `
+        <div class="page">
+          <div class="header">
+            <span class="drawing-title">${e.title}</span>
+            <span class="meta">Drawing ${i + 1} / ${entries.length} &nbsp;·&nbsp; ${dateStr}</span>
+          </div>
+          <div class="drawing-wrap">${e.svg}</div>
+          <div class="footer">Memorial Wall &nbsp;·&nbsp; ${e.title}</div>
+        </div>`).join('\n');
+      const drawHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+        <style>
+          *{box-sizing:border-box;margin:0;padding:0;}
+          @page{size:auto;margin:12mm 14mm;}
+          body{background:#fff;font-family:Arial,sans-serif;color:#111;}
+          .page{page-break-after:always;display:flex;flex-direction:column;min-height:calc(100vh - 24mm);}
+          .page:last-child{page-break-after:avoid;}
+          .header{display:flex;justify-content:space-between;align-items:baseline;border-bottom:0.4mm solid #222;padding-bottom:3mm;margin-bottom:5mm;}
+          .drawing-title{font-size:11pt;font-weight:bold;letter-spacing:.1em;}
+          .meta{font-size:8pt;color:#666;letter-spacing:.04em;}
+          .drawing-wrap{flex:1;display:flex;align-items:center;}
+          .drawing-wrap svg{width:100%;height:auto;display:block;}
+          .footer{border-top:0.3mm solid #ccc;margin-top:5mm;padding-top:2mm;font-size:7pt;color:#999;text-align:right;letter-spacing:.04em;}
+        </style>
+        </head><body>${pages}</body></html>`;
+      const w = window.open('', '_blank');
+      w.document.open(); w.document.write(drawHtml); w.document.close();
+      w.focus();
+      setTimeout(() => w.print(), 800);
+    }
+
+    // Tags — Letter portrait, grid per page, split every 20 pages
+    const TAG_W = Number(p.tagWmm) || 60, TAG_H = Number(p.tagHmm) || 120;
+    const PG_W  = 215.9, PG_H = 279.4, mg = 10, gp = 5;
+    const cols  = Math.max(1, Math.floor((PG_W - 2*mg + gp) / (TAG_W + gp)));
+    const rows  = Math.max(1, Math.floor((PG_H - 2*mg - 8 + gp) / (TAG_H + gp)));
+    const perPage = cols * rows;
+    const TAG_SCALE = 4; // 4px/mm → 864×1118px per Letter page
+
+    const sorted = [...victims].sort((a, b) =>
+      `${a.last},${a.first}`.localeCompare(`${b.last},${b.first}`)
+    );
+    let tagPdf = null, partNum = 1;
+    for (let i = 0; i < sorted.length; i += perPage) {
+      // Composite SVG: tag mm-coords sit in same viewBox as page mm-coords
+      const items = sorted.slice(i, i + perPage).map((v, idx) => {
+        const col = idx % cols, row = Math.floor(idx / cols);
+        const x = (mg + col * (TAG_W + gp)).toFixed(2);
+        const y = (mg + 8 + row * (TAG_H + gp)).toFixed(2);
+        const inner = tagSvg(v, p)
+          .replace(/^<\?xml[^>]*\?>\s*/, '')
+          .replace(/<svg[^>]*>/, '')
+          .replace(/<\/svg>\s*$/, '');
+        return `<g transform="translate(${x},${y})">${inner}</g>`;
+      }).join('');
+      const pageSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${PG_W}mm" height="${PG_H}mm" viewBox="0 0 ${PG_W} ${PG_H}"><rect width="${PG_W}" height="${PG_H}" fill="white"/>${items}</svg>`;
+
+      const canvas = await renderSvgToCanvas(pageSvg, Math.round(PG_W * TAG_SCALE), Math.round(PG_H * TAG_SCALE), 'white');
+      if (!tagPdf) tagPdf = new jsPDF({ orientation: 'p', unit: 'mm', format: [PG_W, PG_H] });
+      else         tagPdf.addPage([PG_W, PG_H], 'p');
+      tagPdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, PG_W, PG_H);
+
+      const isLast  = i + perPage >= sorted.length;
+      const pageNum = Math.floor(i / perPage) + 1;
+      if (isLast || pageNum % 20 === 0) {
+        const suffix = partNum === 1 && isLast ? '' : `_part${String(partNum).padStart(2, '0')}`;
+        tagPdf.save(`tags${suffix}.pdf`);
+        partNum++; tagPdf = null;
+      }
+    }
   }
 
   const siteLegend = useMemo(() => {
@@ -1488,63 +1765,105 @@ export default function App() {
     namesSorted.length ? (backWall.lengthM * 1000 / namesSorted.length).toFixed(1) : "—",
   [namesSorted.length, backWall.lengthM]);
 
+  // Victims whose tag has at least one field wider than available space
+  const overflowVictims = useMemo(() =>
+    victims.filter(v => tagOverflowFields(v, p).length > 0),
+  [victims, p.tagWmm, p.tagHmm]);
+
+  function printOverflowTags() {
+    if (!overflowVictims.length) return;
+    const tagW = Number(p.tagWmm) || 60;
+    const tagH = Number(p.tagHmm) || 120;
+    const margin = 10, gap = 5;
+    const usableW = 215.9 - 2 * margin;
+    const usableH = 279.4 - 2 * margin - 8;
+    const cols = Math.max(1, Math.floor((usableW + gap) / (tagW + gap)));
+    const rows = Math.max(1, Math.floor((usableH + gap) / (tagH + gap)));
+    const perPage = cols * rows;
+    const pages = [];
+    for (let i = 0; i < overflowVictims.length; i += perPage) {
+      pages.push(overflowVictims.slice(i, i + perPage));
+    }
+
+    function makeOverflowPage(tagList, pageNum, total) {
+      const items = tagList.map(v => {
+        const fields = tagOverflowFields(v, p);
+        const fieldNames = fields.map(f => f.field).join(", ");
+        const svg = tagSvg(v, p);
+        const label = `${(v.last || "").trim()}, ${(v.first || "").trim()}`.slice(0, 28);
+        return `<div class="tag-cell">
+          <div class="tag-label overflow-name">${label}</div>
+          ${svg}
+          <div class="overflow-badge">${fieldNames}</div>
+        </div>`;
+      }).join("");
+      return `<div class="page">
+        <div class="page-title">OVERFLOW TAGS — page ${pageNum}/${total} &nbsp;·&nbsp; ${tagW}×${tagH}mm &nbsp;·&nbsp; ${tagList.length} tags</div>
+        <div class="tag-grid">${items}</div>
+      </div>`;
+    }
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Overflow Tags</title><style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#888;font-family:monospace}
+.page{width:215.9mm;height:279.4mm;background:white;padding:${margin}mm;display:flex;flex-direction:column;gap:0;margin:6mm auto;overflow:hidden}
+.page-title{font-size:8pt;color:#c00;margin-bottom:4mm;letter-spacing:.05em;border-bottom:0.5mm solid #c00;padding-bottom:2mm;font-weight:bold}
+.tag-grid{display:flex;flex-wrap:wrap;gap:${gap}mm;align-content:flex-start}
+.tag-cell{display:flex;flex-direction:column;align-items:center;gap:0.5mm}
+.tag-cell svg{display:block;outline:1.5px solid #c00}
+.tag-label{font-size:5pt;color:#999;max-width:${tagW}mm;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;text-align:center}
+.overflow-name{color:#c00;font-weight:bold}
+.overflow-badge{font-size:4.5pt;color:#c00;max-width:${tagW}mm;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media print{
+  body{background:white}
+  .page{margin:0;page-break-after:always;box-shadow:none}
+  @page{size:letter portrait;margin:0}
+}
+</style></head><body>
+${pages.map((pg, i) => makeOverflowPage(pg, i + 1, pages.length)).join("\n")}
+</body></html>`;
+
+    const win = window.open("", "_blank", "width=900,height=800");
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+  }
+
+  function downloadOverflowCsv() {
+    if (!overflowVictims.length) return;
+    const headers = ["Last Name","First Name","Birth Year","Birthplace","Residence","Death Year","Killing Site","Overflow Fields","Overflow Details"];
+    const rows = overflowVictims.map(v => {
+      const fields = tagOverflowFields(v, p);
+      const fieldNames = fields.map(f => f.field).join("; ");
+      const details = fields.map(f => `${f.field}: ${f.value} (${f.widthMm.toFixed(1)}mm)`).join("; ");
+      const cells = [v.last, v.first, v.birthYear, v.birthPlace, v.residence, v.deathYear, v.site, fieldNames, details];
+      return cells.map(c => { const s = String(c ?? ""); return s.includes(",") || s.includes('"') ? `"${s.replace(/"/g,'""')}"` : s; }).join(",");
+    });
+    const csv = [headers.join(","), ...rows].join("\n");
+    triggerDownload(new Blob([csv], { type: "text/csv;charset=utf-8" }), "overflow_tags.csv");
+  }
+
   async function downloadPdf() {
     if (pdfBusy) return;
     setPdfBusy(true);
     try {
-      const entries = [
-        { label: "Back wall — bricks + name tags", svg: backWallSvg },
-        { label: "Front wall — bricks", svg: frontWallSvg },
-        axoSvg ? { label: "Front wall — axonometric", svg: axoSvg } : null,
-        { label: "Construction drawing  1:100", svg: constructionSvg },
-      ].filter(Boolean).filter(e => e.svg);
-
-      const dims = entries.map(({ svg }) => ({
-        w: +(svg.match(/\bwidth="(\d+(?:\.\d+)?)"/)  ?? [, 800])[1],
-        h: +(svg.match(/\bheight="(\d+(?:\.\d+)?)"/) ?? [, 400])[1],
-      }));
-
-      const contentW = 1400, margin = 28, labelH = 20;
-      const scaledH  = dims.map(({ w, h }) => Math.round(h * contentW / w));
-      const pdfW     = contentW + 2 * margin;
-      const pdfH     = margin + entries.reduce((s, _, i) => s + labelH + scaledH[i] + margin, 0);
-
-      const pdf = new jsPDF({ orientation: "l", unit: "px", format: [pdfW, pdfH] });
-      pdf.setFillColor(14, 14, 14);
-      pdf.rect(0, 0, pdfW, pdfH, "F");
-
-      let yPos = margin;
-      for (let i = 0; i < entries.length; i++) {
-        const { label, svg } = entries[i];
-        const { w: origW, h: origH } = dims[i];
-
-        pdf.setFontSize(8);
-        pdf.setTextColor(100, 220, 80);
-        pdf.text(label, margin, yPos + 12);
-        yPos += labelH;
-
-        const scale = 3;
-        const canvas = document.createElement("canvas");
-        canvas.width  = origW * scale;
-        canvas.height = origH * scale;
-        const ctx = canvas.getContext("2d");
-        ctx.fillStyle = "#0e0e0e";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.scale(scale, scale);
-
-        const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-        const url  = URL.createObjectURL(blob);
-        await new Promise((res, rej) => {
-          const img = new Image();
-          img.onload = () => { ctx.drawImage(img, 0, 0); URL.revokeObjectURL(url); res(); };
-          img.onerror = rej;
-          img.src = url;
-        });
-
-        pdf.addImage(canvas.toDataURL("image/jpeg", 0.93), "JPEG", margin, yPos, contentW, scaledH[i]);
-        yPos += scaledH[i] + margin;
+      const CONTENT_W = 2800, MARGIN = 40, QUALITY = 5;
+      const svgs = [backWallSvg, frontWallSvg, axoSvg, constructionSvg].filter(Boolean);
+      if (!svgs.length) return;
+      const dims = svgs.map(svg => {
+        const w = +(svg.match(/\bwidth="(\d+(?:\.\d+)?)"/) ?? [, 800])[1];
+        const h = +(svg.match(/\bheight="(\d+(?:\.\d+)?)"/) ?? [, 400])[1];
+        return { w, h, scaledH: Math.round(h * CONTENT_W / w) };
+      });
+      const pdfW = CONTENT_W + 2 * MARGIN;
+      const pdfH = MARGIN + dims.reduce((s, d) => s + d.scaledH + MARGIN, 0);
+      const pdf = new jsPDF({ orientation: 'l', unit: 'px', format: [pdfW, pdfH] });
+      let y = MARGIN;
+      for (let i = 0; i < svgs.length; i++) {
+        const canvas = await renderSvgToCanvas(svgs[i], CONTENT_W * QUALITY, dims[i].scaledH * QUALITY);
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', MARGIN, y, CONTENT_W, dims[i].scaledH);
+        y += dims[i].scaledH + MARGIN;
       }
-
       pdf.save("memorial-wall.pdf");
     } finally {
       setPdfBusy(false);
@@ -1552,27 +1871,52 @@ export default function App() {
   }
 
   async function downloadZip() {
-    const zip = new JSZip();
-    zip.file("tags_layout.csv",          toCsv(adjustedTagLayout));
-    if (backBricks)  zip.file("bricks_backwall.csv",  toCsv(backBricks.bricks));
-    if (frontBricks) zip.file("bricks_frontwall.csv", toCsv(frontBricks.bricks));
-    zip.file("preview_backwall.svg",     backWallSvg);
-    if (frontBricks) zip.file("preview_frontwall.svg", frontWallSvg);
-    zip.file("construction_1-100.svg",   constructionSvg);
-    zip.file("construction_1-1.dxf",     dxfContent);
+    if (zipBusy) return;
+    setZipBusy(true);
+    try {
+      const zip = new JSZip();
+      if (adjustedTagLayout.length) zip.file("tags_layout.csv", toCsv(adjustedTagLayout));
+      if (backBricks)  zip.file("bricks_backwall.csv",  toCsv(backBricks.bricks));
+      if (frontBricks) zip.file("bricks_frontwall.csv", toCsv(frontBricks.bricks));
+      if (backWallSvg)     zip.file("preview_backwall.svg",    backWallSvg);
+      if (frontWallSvg)    zip.file("preview_frontwall.svg",   frontWallSvg);
+      if (constructionSvg) zip.file("construction_1-100.svg",  constructionSvg);
+      if (dxfContent)      zip.file("construction_1-1.dxf",    dxfContent);
 
-    const keyToVictim = new Map(victims.map(v => [`${v.last}, ${v.first}`, v]));
-    adjustedTagLayout.forEach(t => {
-      const v    = keyToVictim.get(t.name) || {};
-      const safe = t.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_").replaceAll(/^_+|_+$/g, "").slice(0, 80);
-      zip.file(`tags/${String(t.index).padStart(4,"0")}_${safe}.svg`, tagSvg(v, p));
-    });
+      const keyToVictim = new Map(victims.map(v => [`${v.last}, ${v.first}`, v]));
+      adjustedTagLayout.forEach(t => {
+        const v    = keyToVictim.get(t.name) || {};
+        const safe = t.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_").replaceAll(/^_+|_+$/g, "").slice(0, 80);
+        zip.file(`tags/${String(t.index).padStart(4,"0")}_${safe}.svg`, tagSvg(v, p));
+      });
 
-    saveAs(await zip.generateAsync({ type: "blob" }), "wall_exports.zip");
+      const blob = await zip.generateAsync({ type: "blob" });
+      triggerDownload(blob, "wall_exports.zip");
+    } catch (err) {
+      alert("ZIP error: " + err.message);
+    } finally {
+      setZipBusy(false);
+    }
   }
 
-  function downloadDxf() {
-    saveAs(new Blob([dxfContent], { type: "text/plain" }), "memorial_wall_1to1.dxf");
+  async function downloadDxf() {
+    if (!dxfContent) { alert("DXF not ready yet."); return; }
+    const blob = new Blob([dxfContent], { type: "application/octet-stream" });
+    if (window.showSaveFilePicker) {
+      try {
+        const fh = await window.showSaveFilePicker({
+          suggestedName: "memorial_wall_1to1.dxf",
+          types: [{ description: "DXF File", accept: { "application/octet-stream": [".dxf"] } }],
+        });
+        const w = await fh.createWritable();
+        await w.write(blob);
+        await w.close();
+      } catch (err) {
+        if (err.name !== "AbortError") alert("DXF error: " + err.message);
+      }
+    } else {
+      triggerDownload(blob, "memorial_wall_1to1.dxf");
+    }
   }
 
   function printA4Test() {
@@ -1660,6 +2004,7 @@ input[type=number]{width:58px;background:#1a1a1a;color:#39ff14;border:1px solid 
   <span id="status">Waiting for data\u2026</span>
   <label>px/mm <input id="dpi" type="number" value="3.78" min="0.5" max="12" step="0.01"/></label>
   <span style="color:#39ff1055;font-size:11px">adjust px/mm to match your screen \u00b7 scroll to navigate</span>
+  <button id="fsBtn" onclick="toggleFullscreen()" style="background:#1a1a1a;color:#39ff14;border:1px solid #39ff1460;padding:3px 10px;font-family:monospace;font-size:12px;cursor:pointer">&#x26F6; Fullscreen</button>
 </div>
 <div id="container"><svg id="stage"></svg></div>
 <script>
@@ -1842,6 +2187,20 @@ window.addEventListener('message', function(e){
   if (e.data && e.data.type === 'wall-1to1-update') render(e.data);
 });
 window.opener && window.opener.postMessage({type:'wall-1to1-ready'},'*');
+function toggleFullscreen(){
+  var el = document.documentElement;
+  if (!document.fullscreenElement) {
+    el.requestFullscreen && el.requestFullscreen();
+    document.getElementById('fsBtn').textContent = '\u29C4 Exit Fullscreen';
+  } else {
+    document.exitFullscreen && document.exitFullscreen();
+    document.getElementById('fsBtn').textContent = '\u26F6 Fullscreen';
+  }
+}
+document.addEventListener('fullscreenchange', function(){
+  if (!document.fullscreenElement)
+    document.getElementById('fsBtn').textContent = '\u26F6 Fullscreen';
+});
 </script>
 </body></html>`;
 
@@ -1894,7 +2253,7 @@ window.opener && window.opener.postMessage({type:'wall-1to1-ready'},'*');
             onChange={e => e.target.files?.[0] && handleCsv(e.target.files[0])} />
 
           <div style={{ marginTop: 8, fontSize: 12, color: "#39ff14aa" }}>
-            <div><b>Victims:</b> {victims.length} · <b>Tags:</b> {tagLayout.length} / {namesSorted.length}</div>
+            <div><b>Victims:</b> {victims.length} · <b>Tags:</b> {tagLayout.length} / {namesSorted.length} · <b style={{ color: overflowVictims.length ? "#ff6060" : "#39ff14aa" }}>Overflow:</b> <span style={{ color: overflowVictims.length ? "#ff6060" : "#39ff14aa" }}>{overflowVictims.length}</span></div>
             <div><b>Pitch:</b> {pitchMm} mm · <b>Rails:</b> {numRails} · <b>Sites:</b> {siteLegend.length}</div>
             {namesSorted.length > 0 && (() => {
               const overlap = Number(p.tagWmm) - Number(pitchMm);
@@ -2006,6 +2365,11 @@ window.opener && window.opener.postMessage({type:'wall-1to1-ready'},'*');
             <label>Tag width (mm) <input type="number" value={p.tagWmm} onChange={e => setP({...p, tagWmm: +e.target.value})} style={inp}/></label>
             <label>Tag height (mm)<input type="number" value={p.tagHmm} onChange={e => setP({...p, tagHmm: +e.target.value})} style={inp}/></label>
           </div>
+          <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, marginTop: 6, cursor: "pointer" }}>
+            <input type="checkbox" checked={!!p.autoFitText} onChange={e => setP({...p, autoFitText: e.target.checked})} />
+            Auto-fit overflow text
+            {overflowVictims.length > 0 && <span style={{ color: "#ff6060", fontSize: 11 }}>({overflowVictims.length} fields will shrink)</span>}
+          </label>
           <label>Seed<input type="number" value={p.seed} onChange={e => setP({...p, seed: +e.target.value})} style={inp}/></label>
 
           <div style={{ marginTop: 8 }}>
@@ -2139,13 +2503,55 @@ window.opener && window.opener.postMessage({type:'wall-1to1-ready'},'*');
 
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <button onClick={downloadPdf} disabled={pdfBusy} style={{ padding: "8px 0" }}>
-              {pdfBusy ? "Generating PDF…" : "Download PDF"}
+              {pdfBusy ? "Generating PDF…" : "Download PDF (raster, high-res)"}
             </button>
-            <button onClick={downloadZip} disabled={!victims.length} style={{ padding: "8px 0" }}>
-              Download ZIP (CSV + SVG + 1:100 SVG + 1:1 DXF)
+            <button onClick={() => {
+              const entries = [
+                { svg: backWallSvg,     title: "BACK WALL ELEVATION" },
+                { svg: frontWallSvg,    title: "FRONT WALL ELEVATION" },
+                { svg: axoSvg,          title: "AXONOMETRIC VIEW" },
+                { svg: constructionSvg, title: "CONSTRUCTION DETAIL — 1:100" },
+              ].filter(e => e.svg);
+              const dateStr = new Date().toLocaleDateString('en-GB', { year:'numeric', month:'long', day:'numeric' });
+              const pages = entries.map((e, i) => `
+                <div class="page">
+                  <div class="header">
+                    <span class="drawing-title">${e.title}</span>
+                    <span class="meta">Drawing ${i + 1} / ${entries.length} &nbsp;·&nbsp; ${dateStr}</span>
+                  </div>
+                  <div class="drawing-wrap">${e.svg}</div>
+                  <div class="footer">Memorial Wall &nbsp;·&nbsp; ${e.title}</div>
+                </div>`).join('\n');
+              const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+              <style>
+                *{box-sizing:border-box;margin:0;padding:0;}
+                @page{size:auto;margin:12mm 14mm;}
+                body{background:#fff;font-family:Arial,sans-serif;color:#111;}
+                .page{page-break-after:always;display:flex;flex-direction:column;min-height:calc(100vh - 24mm);}
+                .page:last-child{page-break-after:avoid;}
+                .header{display:flex;justify-content:space-between;align-items:baseline;border-bottom:0.4mm solid #222;padding-bottom:3mm;margin-bottom:5mm;}
+                .drawing-title{font-size:11pt;font-weight:bold;letter-spacing:.1em;}
+                .meta{font-size:8pt;color:#666;letter-spacing:.04em;}
+                .drawing-wrap{flex:1;display:flex;align-items:center;}
+                .drawing-wrap svg{width:100%;height:auto;display:block;}
+                .footer{border-top:0.3mm solid #ccc;margin-top:5mm;padding-top:2mm;font-size:7pt;color:#999;text-align:right;letter-spacing:.04em;}
+              </style>
+              </head><body>${pages}</body></html>`;
+              const w = window.open('', '_blank');
+              w.document.open(); w.document.write(html); w.document.close();
+              w.focus();
+              setTimeout(() => w.print(), 800);
+            }} disabled={!backWallSvg && !frontWallSvg && !axoSvg && !constructionSvg} style={{ padding: "8px 0" }}>
+              Print drawings (vector quality)
             </button>
-            <button onClick={downloadTagSvgs} disabled={!tagLayout.length} style={{ padding: "6px 0", fontSize: 12 }}>
-              Download tag SVGs only (ZIP)
+            <button onClick={downloadZip} disabled={!victims.length || zipBusy} style={{ padding: "8px 0" }}>
+              {zipBusy ? "Generating ZIP…" : "Download ZIP (CSV + SVG + 1:100 SVG + 1:1 DXF)"}
+            </button>
+            <button onClick={downloadTagSvgs} disabled={!tagLayout.length || zipBusy} style={{ padding: "6px 0", fontSize: 12 }}>
+              {zipBusy ? "Generating ZIP…" : "Download tag SVGs only (ZIP)"}
+            </button>
+            <button onClick={downloadEverythingBatched} disabled={!victims.length} style={{ padding: "8px 0" }}>
+              Print all drawings + download tag PDFs
             </button>
             <button onClick={downloadDxf} style={{ padding: "6px 0", fontSize: 12 }}>
               Download 1:1 DXF only (open in AutoCAD / Rhino → save as .dwg)
@@ -2155,6 +2561,15 @@ window.opener && window.opener.postMessage({type:'wall-1to1-ready'},'*');
             </button>
             <button onClick={printA4Test} disabled={!victims.length} style={{ padding: "6px 0", fontSize: 12 }}>
               Letter print test (shortest + longest texts) ↗
+            </button>
+            <button onClick={printOverflowTags} disabled={!overflowVictims.length} style={{ padding: "6px 0", fontSize: 12, color: overflowVictims.length ? "#ff6060" : undefined, borderColor: overflowVictims.length ? "#ff606060" : undefined }}>
+              Preview overflow tags ({overflowVictims.length}) ↗
+            </button>
+            <button onClick={downloadOverflowCsv} disabled={!overflowVictims.length} style={{ padding: "6px 0", fontSize: 12, color: overflowVictims.length ? "#ff6060" : undefined, borderColor: overflowVictims.length ? "#ff606060" : undefined }}>
+              Download overflow CSV ({overflowVictims.length})
+            </button>
+            <button onClick={downloadOverflowTagSvgs} disabled={!overflowVictims.length} style={{ padding: "6px 0", fontSize: 12, color: overflowVictims.length ? "#ff6060" : undefined, borderColor: overflowVictims.length ? "#ff606060" : undefined }}>
+              Download overflow tag SVGs ({overflowVictims.length}) ZIP
             </button>
           </div>
 
@@ -2213,7 +2628,7 @@ window.opener && window.opener.postMessage({type:'wall-1to1-ready'},'*');
             : <div style={{ color: "#39ff1444", fontSize: 13 }}>Upload CSV to generate.</div>}
 
           <h4 style={{ marginTop: 20 }}>Construction drawing 1:100 — also exported as DXF 1:1</h4>
-          <div style={{ overflow: "auto", border: "1px solid #39ff1430", background: "#000" }}
+          <div ref={constructionRef} style={{ overflow: "auto", border: "1px solid #39ff1430", background: "#000" }}
             dangerouslySetInnerHTML={{ __html: constructionSvg }} />
         </div>
 
