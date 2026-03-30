@@ -49,6 +49,8 @@ const DEFAULTS = {
   linearEdges: true,    // true = flush to wall edges, false = ragged/random edge margins
   brickColorMode: "random", // "random" | "zoned" | "striped" | "clustered"
   brickBlend: 0.25,         // 0 = pure structure, 1 = fully random bleed (for zoned/striped)
+  smallSiteZone: "spread",  // where rare sites (<1%) cluster: "spread"|"left"|"right"|"ends"|"center"
+  clusterBoostThreshold: 0.10, // sites below this ratio get 3× weight in clustered mode (catches Gugging at ~6%)
   bushHammer: "none",       // "none" | "horizontal" | "vertical" | "diagonal" | "sectional"
   axoProtrusion: 40,        // axonometric wall depth in mm
   autoFitText: false,       // shrink overflow fields to fit tag width
@@ -257,7 +259,7 @@ function makeTagLayout(namesSorted, wall, p) {
 /* -----------------------
    Brick wall generator
 ------------------------ */
-function generateBrickWall(wall, victims, palette, seed, brickColorMode = "random", brickBlend = 0.25) {
+function generateBrickWall(wall, victims, palette, seed, brickColorMode = "random", brickBlend = 0.25, smallSiteZone = "spread", clusterBoostThreshold = 0.10) {
   const rng     = mulberry32(Number(seed) || 1);
   const wallWmm = wall.lengthM * 1000;
   const wallHmm = wall.heightM * 1000;
@@ -270,6 +272,25 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
   // Sites sorted largest→smallest for structured modes
   const sitesSorted  = [...siteCounts.entries()].sort((a, b) => b[1] - a[1]);
   const totalVictims = sitesSorted.reduce((s, [, n]) => s + n, 0);
+
+  // ── Minority-site boost: sites below clusterBoostThreshold get 3× weight in clustered mode ──
+  // Sites below 1% ALSO get zone-restricted (smallSiteZone).
+  const boostThresh = clamp(Number(clusterBoostThreshold) || 0.10, 0, 1);
+  const boostKeys = new Set(siteWeights.filter(sw => sw.w / totalVictims < boostThresh).map(sw => sw.key));
+  const smallKeys = new Set(siteWeights.filter(sw => sw.w / totalVictims < 0.01).map(sw => sw.key));
+  const boostedWeights = siteWeights.map(sw => boostKeys.has(sw.key) ? { ...sw, w: sw.w * 3 } : sw);
+  const majorWeights   = siteWeights.filter(sw => !smallKeys.has(sw.key));
+  const majorOrAll     = majorWeights.length ? majorWeights : siteWeights;
+
+  // Returns true if bxMm falls within the zone where zone-restricted (<1%) sites are allowed
+  function inSmallZone(bxMm) {
+    if (!smallKeys.size || smallSiteZone === "spread") return true;
+    if (smallSiteZone === "left")   return bxMm < 10000;
+    if (smallSiteZone === "right")  return bxMm >= wallWmm - 10000;
+    if (smallSiteZone === "ends")   return bxMm < 10000 || bxMm >= wallWmm - 10000;
+    if (smallSiteZone === "center") { const mid = wallWmm / 2; return bxMm >= mid - 5000 && bxMm < mid + 5000; }
+    return true;
+  }
 
   // ── Zoned: each site owns a horizontal band proportional to victim count ──
   // Boundaries are fuzzy (±4% wall width noise) for a natural look
@@ -288,15 +309,19 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
   }
   while (stripeRows.length < numRows) stripeRows.push(sitesSorted[sitesSorted.length - 1][0]);
 
-  // ── Clustered: 3m × 5-row cells, each cell has a dominant site (75/25 split) ──
+  // ── Clustered: 3m × 5-row cells, each cell has a dominant site ──
+  // Cells inside the small-site zone use boosted weights; outside use major-only weights.
   const clusterW    = 3000;
   const clusterH    = 5;
   const clusterCols = Math.ceil(wallWmm / clusterW);
   const clusterRowG = Math.ceil(numRows / clusterH);
   const clusterMap  = new Map();
   for (let cg = 0; cg < clusterRowG; cg++)
-    for (let cc = 0; cc < clusterCols; cc++)
-      clusterMap.set(`${cc},${cg}`, weightedPick(rng, siteWeights));
+    for (let cc = 0; cc < clusterCols; cc++) {
+      const cellCx = cc * clusterW + clusterW / 2;
+      const weights = inSmallZone(cellCx) ? boostedWeights : majorOrAll;
+      clusterMap.set(`${cc},${cg}`, weightedPick(rng, weights));
+    }
 
   const blend = clamp(Number(brickBlend) || 0, 0, 1);
 
@@ -315,7 +340,12 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
       const cc  = clamp(Math.floor(bx / clusterW), 0, clusterCols - 1);
       const cg  = clamp(Math.floor(r  / clusterH), 0, clusterRowG  - 1);
       const dom = clusterMap.get(`${cc},${cg}`);
-      return rng() < (0.25 + blend * 0.5) ? weightedPick(rng, siteWeights) : dom;
+      const inZone  = inSmallZone(bx);
+      const weights = inZone ? boostedWeights : majorOrAll;
+      if (rng() < (0.25 + blend * 0.5)) return weightedPick(rng, weights);
+      // If dominant is a small site but we're outside its zone, fall back to major weights
+      if (smallKeys.has(dom) && !inZone) return weightedPick(rng, majorOrAll);
+      return dom;
     }
     return weightedPick(rng, siteWeights); // "random"
   }
@@ -1630,8 +1660,8 @@ export default function App() {
     return tagLayout.map((t, i) => previewNudges[i] ? { ...t, xMm: t.xMm + previewNudges[i] } : t);
   }, [tagLayout, previewNudges]);
 
-  const backBricks  = useMemo(() => victims.length ? generateBrickWall(backWall,  victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend) : null, [backWall,  victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend]);
-  const frontBricks = useMemo(() => victims.length ? generateBrickWall(frontWall, victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend) : null, [frontWall, victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend]);
+  const backBricks  = useMemo(() => victims.length ? generateBrickWall(backWall,  victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone, p.clusterBoostThreshold) : null, [backWall,  victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone, p.clusterBoostThreshold]);
+  const frontBricks = useMemo(() => victims.length ? generateBrickWall(frontWall, victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone, p.clusterBoostThreshold) : null, [frontWall, victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone, p.clusterBoostThreshold]);
 
   const previewRailHeights = useMemo(() =>
     railHeights(Number(p.tagBandMinM) * 1000, Number(p.tagBandMaxM) * 1000, Number(p.tagHmm) || 120, Number(p.railCountOverride) || 0),
@@ -2367,6 +2397,41 @@ document.addEventListener('fullscreenchange', function(){
             {p.brickColorMode === "striped"   && "Horizontal strata — largest site occupies most rows (like geological layers)"}
             {p.brickColorMode === "clustered" && "Blotchy regions ~3m wide · dominant site per cluster with bleed"}
           </div>
+          {p.brickColorMode === "clustered" && (
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+              <div>
+                <div style={{ fontSize: 12, color: "#aaa", marginBottom: 4 }}>Rare site zone <span style={{ color: "#39ff1066", fontSize: 11 }}>(sites &lt;1% concentrated here)</span></div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 3 }}>
+                  {[
+                    { val: "spread", label: "Spread" },
+                    { val: "left",   label: "Left 10m" },
+                    { val: "right",  label: "Right 10m" },
+                    { val: "ends",   label: "Both ends" },
+                    { val: "center", label: "Center" },
+                  ].map(({ val, label }) => (
+                    <label key={val} style={{
+                      display: "flex", alignItems: "center", gap: 4, cursor: "pointer",
+                      padding: "3px 5px", borderRadius: 3, fontSize: 11,
+                      border: `1px solid ${p.smallSiteZone === val ? "#39ff14" : "#39ff1430"}`,
+                      background: p.smallSiteZone === val ? "#39ff1415" : "transparent",
+                    }}>
+                      <input type="radio" name="smallSiteZone" value={val} checked={p.smallSiteZone === val}
+                        onChange={() => setP({...p, smallSiteZone: val})}
+                        style={{ accentColor: "#39ff14", margin: 0 }} />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <label style={{ fontSize: 12 }}>
+                Cluster boost threshold <b>{Math.round(Number(p.clusterBoostThreshold) * 100)}%</b>
+                <span style={{ fontSize: 11, color: "#39ff1066", marginLeft: 6 }}>sites below this get 3× cluster weight</span>
+                <input type="range" min="0.01" max="0.5" step="0.01" value={p.clusterBoostThreshold}
+                  onChange={e => setP({...p, clusterBoostThreshold: +e.target.value})}
+                  style={{ ...inp, accentColor: "#39ff14" }} />
+              </label>
+            </div>
+          )}
           {p.brickColorMode !== "random" && (
             <div style={{ marginTop: 8 }}>
               <label style={{ fontSize: 12 }}>
