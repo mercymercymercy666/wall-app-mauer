@@ -20,9 +20,9 @@ import jsPDF from "jspdf";
 const BRICK_H_MM = 75;
 const MORTAR_MM  = 2;
 const BRICK_SIZES = [
-  { type: "standard", wMm: 270, p: 0.60 },
+  { type: "standard", wMm: 270, p: 0.55 },
   { type: "half",     wMm: 140, p: 0.25 },
-  { type: "oneHalf",  wMm: 400, p: 0.15 },
+  { type: "oneHalf",  wMm: 400, p: 0.20 },
 ];
 const HALF_OFFSET_MM = 135;
 
@@ -120,17 +120,23 @@ function countBySite(rows) {
 }
 
 /* -----------------------
-   Site palette — earth tones, hue 0–80°
+   Site palette — matched to physical brick samples
+   Order follows alphabetical site sort (Am Steinhof, Gugging, Hartheim,
+   Linz-Waldegg, Mauer-Öhling, Meseritz-Obrawalde)
 ------------------------ */
 function buildSitePalette(victims) {
   const sites = [...new Set(victims.map(v => v.site).filter(Boolean))].sort();
-  const n = sites.length;
+  const PHOTO_COLORS = [
+    "#c4a46b",  // sandy beige/tan        (Am Steinhof)
+    "#7d8460",  // olive/sage green-gray  (Gugging)
+    "#b2503c",  // terracotta red         (Hartheim)
+    "#b08070",  // muted dusty rose       (Linz-Waldegg)
+    "#4e4e4e",  // dark charcoal gray     (Mauer-Öhling)
+    "#9a8878",  // warm medium gray       (Meseritz-Obrawalde)
+  ];
   const map = new Map();
   sites.forEach((site, i) => {
-    const hue   = Math.round((i * 80) / Math.max(n, 1));
-    const light = i % 2 === 0 ? 44 + (i % 4) * 3 : 30 + (i % 4) * 3;
-    const sat   = 55 + (i % 3) * 5;
-    map.set(site, tinycolor({ h: hue, s: sat, l: light }).toHexString());
+    map.set(site, PHOTO_COLORS[i % PHOTO_COLORS.length]);
   });
   return map;
 }
@@ -305,19 +311,20 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
   }
   while (stripeRows.length < numRows) stripeRows.push(sitesSorted[sitesSorted.length - 1][0]);
 
-  // ── Clustered: 3m × 5-row cells, each cell has a dominant site ──
-  // Cells inside the small-site zone use boosted weights; outside use major-only weights.
-  const clusterW    = 3000;
-  const clusterH    = 5;
-  const clusterCols = Math.ceil(wallWmm / clusterW);
-  const clusterRowG = Math.ceil(numRows / clusterH);
-  const clusterMap  = new Map();
-  for (let cg = 0; cg < clusterRowG; cg++)
-    for (let cc = 0; cc < clusterCols; cc++) {
-      const cellCx = cc * clusterW + clusterW / 2;
-      const weights = inSmallZone(cellCx) ? boostedWeights : majorOrAll;
-      clusterMap.set(`${cc},${cg}`, weightedPick(rng, weights));
-    }
+  // ── Clustered: Voronoi blobs with random centers (~1 per 2m) ──
+  // Organic, irregular shapes instead of rectangular grid cells.
+  // Distance uses 2000mm X-scale × 4-row Y-scale so blobs look natural.
+  const VC_SCALE_X = 2000, VC_SCALE_Y = 4;
+  const numVCenters = Math.max(6, Math.round(wallWmm / 2000));
+  const vcX = [], vcY = [], vcSite = [];
+  for (let i = 0; i < numVCenters; i++) {
+    // Spread centers across wall width with jitter, random height
+    const cx = (i + 0.3 + rng() * 0.6) * (wallWmm / numVCenters);
+    const cy = rng() * numRows;
+    const inZone = inSmallZone(cx);
+    const weights = inZone ? boostedWeights : majorOrAll;
+    vcX.push(cx); vcY.push(cy); vcSite.push(weightedPick(rng, weights));
+  }
 
   const blend = clamp(Number(brickBlend) || 0, 0, 1);
 
@@ -333,9 +340,14 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
       return stripeRows[r % stripeRows.length];
     }
     if (brickColorMode === "clustered") {
-      const cc  = clamp(Math.floor(bx / clusterW), 0, clusterCols - 1);
-      const cg  = clamp(Math.floor(r  / clusterH), 0, clusterRowG  - 1);
-      const dom = clusterMap.get(`${cc},${cg}`);
+      // Find nearest Voronoi center (normalized distance)
+      let bestD = Infinity, dom = vcSite[0];
+      for (let j = 0; j < vcX.length; j++) {
+        const dx = (bx - vcX[j]) / VC_SCALE_X;
+        const dy = (r  - vcY[j]) / VC_SCALE_Y;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; dom = vcSite[j]; }
+      }
       const inZone  = inSmallZone(bx);
       const weights = inZone ? boostedWeights : majorOrAll;
       if (rng() < (0.25 + blend * 0.5)) return weightedPick(rng, weights);
