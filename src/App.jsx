@@ -347,14 +347,12 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
   }
 
   const bricks = [];
-  // Small-site run tracking: when a <1% site is picked, force 3–4 consecutive bricks in that row
-  let runSite = null, runLeft = 0;
-
   for (let r = 0; r < numRows; r++) {
-    runLeft = 0; runSite = null; // reset run at start of each row
     const yMm    = r * BRICK_H_MM;
     const offset = r % 2 === 1 ? HALF_OFFSET_MM : 0;
     let xMm      = -offset;
+    let gSite = null, gLeft = 0; // group state — reset each row
+
     while (xMm < wallWmm) {
       const size = weightedPickSize(rng);
       const x0 = xMm, x1 = xMm + size.wMm;
@@ -362,19 +360,19 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
         const bx = Math.max(0, x0);
         const bw = Math.min(wallWmm, x1) - bx;
         if (bw > 1) {
-          let site;
-          if (runLeft > 0) {
-            site = runSite; runLeft--;
+          // Pick a new site only when the current group is exhausted
+          if (gLeft <= 0) {
+            gSite = getSite(bx, r);
+            gLeft = 2 + Math.floor(rng() * 3); // group lasts 3–5 bricks total
           } else {
-            site = getSite(bx, r);
-            if (smallKeys.has(site)) { runSite = site; runLeft = 2 + Math.floor(rng() * 2); } // 3–4 total
+            gLeft--;
           }
-          const color = palette.get(site) || "#b05a28";
+          const color = palette.get(gSite) || "#b05a28";
           bricks.push({
             wall: wall.id, row: r,
             xMm: +bx.toFixed(1), yMm: +yMm.toFixed(1),
             wMm: +bw.toFixed(1), hMm: BRICK_H_MM - MORTAR_MM,
-            sizeType: size.type, site, color,
+            sizeType: size.type, site: gSite, color,
           });
         }
       }
