@@ -30,9 +30,9 @@ const HALF_OFFSET_MM = 135;
    Defaults
 ------------------------ */
 const DEFAULTS = {
-  backLengthM:  4.651,
+  backLengthM:  46.51,
   backHeightM:  1.70,   // brick zone only (excl. concrete base + cap)
-  frontLengthM: 4.566,
+  frontLengthM: 45.57,
   frontHeightM: 0.90,   // brick zone only
   concreteBaseM: 0.40,  // concrete plinth height below brick zone (both walls)
   concreteCapM:  0.06,  // concrete coping height above brick zone (both walls)
@@ -520,8 +520,25 @@ function backWallPreviewSvg(brickGrid, tagLayout, rHeightsMm = [], concreteBaseM
       + `font-family="monospace" font-size="4.5" fill="#39ff1450">${s*5}m</text>`;
   }
 
+  // Dimension annotations (right side bracket)
+  const annM = 80, lx = viewW + 6, tx = viewW + 14;
+  const zones = [
+    { y0: 0,            y1: capH,          label: `${(concreteCapMm/10).toFixed(0)} cm`,  color: "#c8b49a" },
+    { y0: capH,         y1: capH + brickH, label: `${(wallHmm/10).toFixed(0)} cm brick`,  color: "#ddd"    },
+    { y0: capH + brickH,y1: viewH,         label: `${(concreteBaseMm/10).toFixed(0)} cm`, color: "#c8b49a" },
+  ];
+  svg += `<line x1="${lx}" y1="0" x2="${lx}" y2="${viewH}" stroke="#666" stroke-width="0.5"/>`;
+  for (const z of zones) {
+    const mid = (z.y0 + z.y1) / 2;
+    svg += `<line x1="${lx-3}" y1="${z.y0}" x2="${lx+3}" y2="${z.y0}" stroke="#888" stroke-width="0.5"/>`;
+    svg += `<line x1="${lx-3}" y1="${z.y1}" x2="${lx+3}" y2="${z.y1}" stroke="#888" stroke-width="0.5"/>`;
+    if (z.y1 - z.y0 >= 4)
+      svg += `<text x="${tx}" y="${mid}" dominant-baseline="middle" font-family="monospace" font-size="7" fill="${z.color}">${z.label}</text>`;
+  }
+
+  const totalW = viewW + annM;
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${viewW}" height="${totalH}" viewBox="0 0 ${viewW} ${totalH}">${svg}</svg>`;
+<svg xmlns="http://www.w3.org/2000/svg" width="${totalW}" height="${totalH}" viewBox="0 0 ${totalW} ${totalH}">${svg}</svg>`;
 }
 
 function frontWallPreviewSvg(brickGrid, bushHammer = "none", concreteBaseMm = 0, concreteCapMm = 0) {
@@ -576,8 +593,26 @@ function frontWallPreviewSvg(brickGrid, bushHammer = "none", concreteBaseMm = 0,
     svg += `<rect x="${(b.xMm*S).toFixed(2)}" y="${(capH + b.yMm*S).toFixed(2)}" `
       + `width="${Math.max(0.3,b.wMm*S).toFixed(2)}" height="${Math.max(0.3,b.hMm*S).toFixed(2)}" fill="${b.color}"/>`;
   svg += bhOverlay;
+
+  // Dimension annotations (right side bracket)
+  const annM = 80, lx = viewW + 6, tx = viewW + 14;
+  const zones = [
+    { y0: 0,             y1: capH,          label: `${(concreteCapMm/10).toFixed(0)} cm`,  color: "#c8b49a" },
+    { y0: capH,          y1: capH + brickH, label: `${(wallHmm/10).toFixed(0)} cm brick`,  color: "#ddd"    },
+    { y0: capH + brickH, y1: viewH,         label: `${(concreteBaseMm/10).toFixed(0)} cm`, color: "#c8b49a" },
+  ];
+  svg += `<line x1="${lx}" y1="0" x2="${lx}" y2="${viewH}" stroke="#666" stroke-width="0.5"/>`;
+  for (const z of zones) {
+    const mid = (z.y0 + z.y1) / 2;
+    svg += `<line x1="${lx-3}" y1="${z.y0}" x2="${lx+3}" y2="${z.y0}" stroke="#888" stroke-width="0.5"/>`;
+    svg += `<line x1="${lx-3}" y1="${z.y1}" x2="${lx+3}" y2="${z.y1}" stroke="#888" stroke-width="0.5"/>`;
+    if (z.y1 - z.y0 >= 4)
+      svg += `<text x="${tx}" y="${mid}" dominant-baseline="middle" font-family="monospace" font-size="7" fill="${z.color}">${z.label}</text>`;
+  }
+
+  const totalW = viewW + annM;
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${viewW}" height="${viewH}" viewBox="0 0 ${viewW} ${viewH}">${svg}</svg>`;
+<svg xmlns="http://www.w3.org/2000/svg" width="${totalW}" height="${viewH}" viewBox="0 0 ${totalW} ${viewH}">${svg}</svg>`;
 }
 
 /* -----------------------
