@@ -30,12 +30,14 @@ const HALF_OFFSET_MM = 135;
    Defaults
 ------------------------ */
 const DEFAULTS = {
-  backLengthM:  45,
-  backHeightM:  2.5,
-  frontLengthM: 45,
-  frontHeightM: 1.5,
-  tagBandMinM:  1.20,   // default: comfortable reach height
-  tagBandMaxM:  1.70,
+  backLengthM:  4.651,
+  backHeightM:  1.70,   // brick zone only (excl. concrete base + cap)
+  frontLengthM: 4.566,
+  frontHeightM: 0.90,   // brick zone only
+  concreteBaseM: 0.40,  // concrete plinth height below brick zone (both walls)
+  concreteCapM:  0.06,  // concrete coping height above brick zone (both walls)
+  tagBandMinM:  0.20,   // default: comfortable reach height
+  tagBandMaxM:  1.40,
   tagWmm: 60,
   tagHmm: 120,
   yJitterM: 0.04,
@@ -448,31 +450,38 @@ function bushHammerDiagramSvg(type) {
 /* -----------------------
    SVG previews
 ------------------------ */
-function backWallPreviewSvg(brickGrid, tagLayout, rHeightsMm = []) {
+function backWallPreviewSvg(brickGrid, tagLayout, rHeightsMm = [], concreteBaseMm = 0, concreteCapMm = 0) {
   const { wallWmm, wallHmm, bricks } = brickGrid;
-  const S      = PREVIEW_SCALE;
-  const viewW  = Math.round(wallWmm * S);
-  const viewH  = Math.round(wallHmm * S);
-  const totalH = viewH + SECTION_STRIP_H;
+  const S       = PREVIEW_SCALE;
+  const viewW   = Math.round(wallWmm * S);
+  const capH    = Math.round(concreteCapMm * S);
+  const brickH  = Math.round(wallHmm * S);
+  const baseH   = Math.round(concreteBaseMm * S);
+  const viewH   = capH + brickH + baseH;
+  const totalH  = viewH + SECTION_STRIP_H;
 
-  let svg = `<rect x="0" y="0" width="${viewW}" height="${viewH}" fill="#d4c9b8"/>`;
+  const concreteColor = "#c8b49a";
+  let svg = "";
+  if (capH > 0)  svg += `<rect x="0" y="0" width="${viewW}" height="${capH}" fill="${concreteColor}"/>`;
+  svg += `<rect x="0" y="${capH}" width="${viewW}" height="${brickH}" fill="#d4c9b8"/>`;
+  if (baseH > 0) svg += `<rect x="0" y="${capH + brickH}" width="${viewW}" height="${baseH}" fill="${concreteColor}"/>`;
 
   for (const b of bricks) {
-    svg += `<rect x="${(b.xMm*S).toFixed(2)}" y="${(b.yMm*S).toFixed(2)}" `
+    svg += `<rect x="${(b.xMm*S).toFixed(2)}" y="${(capH + b.yMm*S).toFixed(2)}" `
       + `width="${Math.max(0.3,b.wMm*S).toFixed(2)}" height="${Math.max(0.3,b.hMm*S).toFixed(2)}" `
       + `fill="${b.color}"/>`;
   }
 
   // Rails drawn before tags so they appear behind (tags are semi-transparent)
   for (let r = 0; r < rHeightsMm.length; r++) {
-    const ry = (viewH - rHeightsMm[r] * S).toFixed(1);
+    const ry = (capH + brickH - rHeightsMm[r] * S).toFixed(1);
     svg += `<line x1="0" y1="${ry}" x2="${viewW}" y2="${ry}" stroke="#b0a090" stroke-width="1.2" stroke-opacity="0.85"/>`;
     svg += `<text x="4" y="${+ry - 1.5}" font-family="monospace" font-size="5" fill="#b0a090cc">R${r+1}</text>`;
   }
 
   for (const t of tagLayout) {
     const x  = t.xMm * S;
-    const y  = (wallHmm - t.yMm - t.hMm) * S;
+    const y  = capH + (wallHmm - t.yMm - t.hMm) * S;
     const w  = Math.max(0.5, t.wMm * S);
     const h  = Math.max(0.5, t.hMm * S);
     const cx = (x + w / 2).toFixed(2);
@@ -515,11 +524,14 @@ function backWallPreviewSvg(brickGrid, tagLayout, rHeightsMm = []) {
 <svg xmlns="http://www.w3.org/2000/svg" width="${viewW}" height="${totalH}" viewBox="0 0 ${viewW} ${totalH}">${svg}</svg>`;
 }
 
-function frontWallPreviewSvg(brickGrid, bushHammer = "none") {
+function frontWallPreviewSvg(brickGrid, bushHammer = "none", concreteBaseMm = 0, concreteCapMm = 0) {
   const { wallWmm, wallHmm, bricks } = brickGrid;
-  const S     = PREVIEW_SCALE;
-  const viewW = Math.round(wallWmm * S);
-  const viewH = Math.round(wallHmm * S);
+  const S      = PREVIEW_SCALE;
+  const viewW  = Math.round(wallWmm * S);
+  const capH   = Math.round(concreteCapMm * S);
+  const brickH = Math.round(wallHmm * S);
+  const baseH  = Math.round(concreteBaseMm * S);
+  const viewH  = capH + brickH + baseH;
 
   // Bush-hammer SVG pattern defs
   // Pitch derived from the 3D diagram proportions (sp/brickFace ≈ constant):
@@ -547,17 +559,21 @@ function frontWallPreviewSvg(brickGrid, bushHammer = "none") {
       for (let s = 0; s < nSec; s++) {
         const sx0 = (s * SECTION_MM * S).toFixed(1);
         const sw  = (Math.min((s + 1) * SECTION_MM, wallWmm) * S - s * SECTION_MM * S).toFixed(1);
-        bhOverlay += `<rect x="${sx0}" y="0" width="${sw}" height="${viewH}" fill="url(#${pats[s % 3]})" pointer-events="none"/>`;
+        bhOverlay += `<rect x="${sx0}" y="${capH}" width="${sw}" height="${brickH}" fill="url(#${pats[s % 3]})" pointer-events="none"/>`;
       }
     } else {
       const patId = bushHammer === "horizontal" ? "bh_h" : bushHammer === "vertical" ? "bh_v" : "bh_d";
-      bhOverlay = `<rect x="0" y="0" width="${viewW}" height="${viewH}" fill="url(#${patId})" pointer-events="none"/>`;
+      bhOverlay = `<rect x="0" y="${capH}" width="${viewW}" height="${brickH}" fill="url(#${patId})" pointer-events="none"/>`;
     }
   }
 
-  let svg = `${defs}<rect x="0" y="0" width="${viewW}" height="${viewH}" fill="#d4c9b8"/>`;
+  const concreteColor = "#c8b49a";
+  let svg = `${defs}`;
+  if (capH > 0)  svg += `<rect x="0" y="0" width="${viewW}" height="${capH}" fill="${concreteColor}"/>`;
+  svg += `<rect x="0" y="${capH}" width="${viewW}" height="${brickH}" fill="#d4c9b8"/>`;
+  if (baseH > 0) svg += `<rect x="0" y="${capH + brickH}" width="${viewW}" height="${baseH}" fill="${concreteColor}"/>`;
   for (const b of bricks)
-    svg += `<rect x="${(b.xMm*S).toFixed(2)}" y="${(b.yMm*S).toFixed(2)}" `
+    svg += `<rect x="${(b.xMm*S).toFixed(2)}" y="${(capH + b.yMm*S).toFixed(2)}" `
       + `width="${Math.max(0.3,b.wMm*S).toFixed(2)}" height="${Math.max(0.3,b.hMm*S).toFixed(2)}" fill="${b.color}"/>`;
   svg += bhOverlay;
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -1586,8 +1602,8 @@ export default function App() {
     railHeights(Number(p.tagBandMinM) * 1000, Number(p.tagBandMaxM) * 1000, Number(p.tagHmm) || 120, Number(p.railCountOverride) || 0),
   [p.tagBandMinM, p.tagBandMaxM, p.tagHmm, p.railCountOverride]);
 
-  const backWallSvg     = useMemo(() => backBricks  ? backWallPreviewSvg(backBricks, adjustedTagLayout, previewRailHeights) : "", [backBricks, adjustedTagLayout, previewRailHeights]);
-  const frontWallSvg    = useMemo(() => frontBricks ? frontWallPreviewSvg(frontBricks, p.bushHammer) : "", [frontBricks, p.bushHammer]);
+  const backWallSvg     = useMemo(() => backBricks  ? backWallPreviewSvg(backBricks, adjustedTagLayout, previewRailHeights, +p.concreteBaseM * 1000, +p.concreteCapM * 1000) : "", [backBricks, adjustedTagLayout, previewRailHeights, p.concreteBaseM, p.concreteCapM]);
+  const frontWallSvg    = useMemo(() => frontBricks ? frontWallPreviewSvg(frontBricks, p.bushHammer, +p.concreteBaseM * 1000, +p.concreteCapM * 1000) : "", [frontBricks, p.bushHammer, p.concreteBaseM, p.concreteCapM]);
   const axoSvg          = useMemo(() => frontBricks ? wallAxonometricSvg(frontBricks, p.bushHammer, Number(p.axoProtrusion) || 380, Number(p.seed) || 1) : "", [frontBricks, p.bushHammer, p.axoProtrusion, p.seed]);
   const constructionSvg = useMemo(() => constructionDrawingSvg(backWall, frontWall, p, adjustedTagLayout, dragOffsets), [backWall, frontWall, p, adjustedTagLayout, dragOffsets]);
   const dxfContent      = useMemo(() => generateDxf(backWall, frontWall, adjustedTagLayout, p), [backWall, frontWall, adjustedTagLayout, p]);
@@ -2276,10 +2292,12 @@ document.addEventListener('fullscreenchange', function(){
 
           <h3>2) Wall dimensions</h3>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-            <label>Back length (m) <input type="number" step="0.5" value={p.backLengthM}  onChange={e => setP({...p, backLengthM:  +e.target.value})} style={inp}/></label>
-            <label>Back height (m) <input type="number" step="0.1" value={p.backHeightM}  onChange={e => setP({...p, backHeightM:  +e.target.value})} style={inp}/></label>
-            <label>Front length (m)<input type="number" step="0.5" value={p.frontLengthM} onChange={e => setP({...p, frontLengthM: +e.target.value})} style={inp}/></label>
-            <label>Front height (m)<input type="number" step="0.1" value={p.frontHeightM} onChange={e => setP({...p, frontHeightM: +e.target.value})} style={inp}/></label>
+            <label>Back length (m) <input type="number" step="0.1" value={p.backLengthM}  onChange={e => setP({...p, backLengthM:  +e.target.value})} style={inp}/></label>
+            <label>Back brick height (m) <input type="number" step="0.1" value={p.backHeightM}  onChange={e => setP({...p, backHeightM:  +e.target.value})} style={inp}/></label>
+            <label>Front length (m)<input type="number" step="0.1" value={p.frontLengthM} onChange={e => setP({...p, frontLengthM: +e.target.value})} style={inp}/></label>
+            <label>Front brick height (m)<input type="number" step="0.1" value={p.frontHeightM} onChange={e => setP({...p, frontHeightM: +e.target.value})} style={inp}/></label>
+            <label>Concrete base (m)<input type="number" step="0.01" value={p.concreteBaseM} onChange={e => setP({...p, concreteBaseM: +e.target.value})} style={inp}/></label>
+            <label>Concrete cap (m)<input type="number" step="0.01" value={p.concreteCapM}  onChange={e => setP({...p, concreteCapM:  +e.target.value})} style={inp}/></label>
           </div>
 
           <hr />
