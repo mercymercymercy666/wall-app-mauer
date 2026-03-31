@@ -49,6 +49,7 @@ const DEFAULTS = {
   linearEdges: true,    // true = flush to wall edges, false = ragged/random edge margins
   brickColorMode: "random", // "random" | "zoned" | "striped" | "clustered"
   brickBlend: 0.25,         // 0 = pure structure, 1 = fully random bleed (for zoned/striped)
+  clusterSpread: 0.45,      // clustered only: 0 = horizontal runs, 1 = natural 2D blobs (vertical carry)
   smallSiteZone: "spread",  // where rare sites (<1%) cluster: "spread"|"left"|"right"|"ends"|"center"
   bushHammer: "none",       // "none" | "horizontal" | "vertical" | "diagonal" | "sectional"
   axoProtrusion: 40,        // axonometric wall depth in mm
@@ -264,7 +265,7 @@ function makeTagLayout(namesSorted, wall, p) {
 /* -----------------------
    Brick wall generator
 ------------------------ */
-function generateBrickWall(wall, victims, palette, seed, brickColorMode = "random", brickBlend = 0.25, smallSiteZone = "spread") {
+function generateBrickWall(wall, victims, palette, seed, brickColorMode = "random", brickBlend = 0.25, smallSiteZone = "spread", clusterSpread = 0.45) {
   const rng     = mulberry32(Number(seed) || 1);
   const wallWmm = wall.lengthM * 1000;
   const wallHmm = wall.heightM * 1000;
@@ -311,13 +312,16 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
   }
   while (stripeRows.length < numRows) stripeRows.push(sitesSorted[sitesSorted.length - 1][0]);
 
-  // ── Clustered: 2D Voronoi blobs — grid of centers (3 rows × ~1 per 1.5m) with jitter ──
-  // 3 vertical levels ensures patches span the full wall height, not just horizontal streaks.
-  // Scale parameters make each blob roughly 1.5m wide × 7 rows (≈540mm) tall.
-  const numVCols = Math.max(4, Math.ceil(wallWmm / 1500));
-  const numVRows = 3;
-  const VC_SCALE_X = wallWmm / numVCols;        // ~1500mm per normalized unit
-  const VC_SCALE_Y = numRows / numVRows;         // ~7 rows per normalized unit
+  // ── Clustered: 2D Voronoi blobs — grid of centers with jitter ──
+  // clusterSpread controls vertical carry (0 = horizontal runs, 1 = natural 2D blobs).
+  // Higher spread → more Voronoi rows + taller normalized cells + stronger vertical carry.
+  const spread     = clamp(Number(clusterSpread) || 0, 0, 1);
+  const vertCarry  = spread * 0.80;                          // max 80% chance to inherit site from row above
+  const BUCKET_W   = 150;                                    // X bucket width for prev-row lookup (~half brick)
+  const numVCols   = Math.max(4, Math.ceil(wallWmm / 1500));
+  const numVRows   = 3 + Math.round(spread * 3);             // 3 (flat) → 6 (distributed) levels
+  const VC_SCALE_X = wallWmm / numVCols;
+  const VC_SCALE_Y = (numRows / numVRows) * (0.5 + spread);  // taller blobs at higher spread
   const vcX = [], vcY = [], vcSite = [];
   for (let vr = 0; vr < numVRows; vr++) {
     for (let vc = 0; vc < numVCols; vc++) {
@@ -362,11 +366,13 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
   }
 
   const bricks = [];
+  let prevRowSites = new Map(); // bucket → site from previous row (for vertical carry)
   for (let r = 0; r < numRows; r++) {
     const yMm    = r * BRICK_H_MM;
     const offset = r % 2 === 1 ? HALF_OFFSET_MM : 0;
     let xMm      = -offset;
     let gSite = null, gLeft = 0; // group state — reset each row
+    const currRowSites = new Map();
 
     while (xMm < wallWmm) {
       const size = weightedPickSize(rng);
@@ -377,11 +383,15 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
         if (bw > 1) {
           // Pick a new site only when the current group is exhausted
           if (gLeft <= 0) {
-            gSite = getSite(bx, r);
+            const bucket = Math.floor(bx / BUCKET_W);
+            const above  = prevRowSites.get(bucket);
+            // Vertical carry: inherit site from row above with probability vertCarry
+            gSite = (above !== undefined && rng() < vertCarry) ? above : getSite(bx, r);
             gLeft = 2 + Math.floor(rng() * 3); // group lasts 3–5 bricks total
           } else {
             gLeft--;
           }
+          currRowSites.set(Math.floor(bx / BUCKET_W), gSite);
           const color = palette.get(gSite) || "#b05a28";
           bricks.push({
             wall: wall.id, row: r,
@@ -393,6 +403,7 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
       }
       xMm += size.wMm;
     }
+    prevRowSites = currRowSites; // carry forward for next row
   }
   return { numRows, wallWmm, wallHmm, bricks };
 }
@@ -1679,8 +1690,8 @@ export default function App() {
     return tagLayout.map((t, i) => previewNudges[i] ? { ...t, xMm: t.xMm + previewNudges[i] } : t);
   }, [tagLayout, previewNudges]);
 
-  const backBricks  = useMemo(() => victims.length ? generateBrickWall(backWall,  victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone) : null, [backWall,  victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone]);
-  const frontBricks = useMemo(() => victims.length ? generateBrickWall(frontWall, victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone) : null, [frontWall, victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone]);
+  const backBricks  = useMemo(() => victims.length ? generateBrickWall(backWall,  victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone, p.clusterSpread) : null, [backWall,  victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone, p.clusterSpread]);
+  const frontBricks = useMemo(() => victims.length ? generateBrickWall(frontWall, victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone, p.clusterSpread) : null, [frontWall, victims, sitePalette, p.seed, p.brickColorMode, p.brickBlend, p.smallSiteZone, p.clusterSpread]);
 
   const previewRailHeights = useMemo(() =>
     railHeights(Number(p.tagBandMinM) * 1000, Number(p.tagBandMaxM) * 1000, Number(p.tagHmm) || 120, Number(p.railCountOverride) || 0),
@@ -2418,6 +2429,19 @@ document.addEventListener('fullscreenchange', function(){
           </div>
           {p.brickColorMode === "clustered" && (
             <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+              <div>
+                <label style={{ fontSize: 12 }}>
+                  Patch shape <b>{Number(p.clusterSpread) < 0.25 ? "horizontal runs" : Number(p.clusterSpread) > 0.75 ? "natural blobs" : "mixed"}</b>
+                  <input type="range" min="0" max="1" step="0.05" value={p.clusterSpread}
+                    onChange={e => setP({...p, clusterSpread: +e.target.value})}
+                    style={{ ...inp, accentColor: "#39ff14" }} />
+                </label>
+                <div style={{ fontSize: 11, color: "#39ff1066" }}>
+                  {Number(p.clusterSpread) < 0.25 ? "Horizontal color runs per row"
+                    : Number(p.clusterSpread) > 0.75 ? "Color spreads vertically — organic 2D patches"
+                    : "Mixed — some vertical spread"}
+                </div>
+              </div>
               <div>
                 <div style={{ fontSize: 12, color: "#aaa", marginBottom: 4 }}>Rare site zone <span style={{ color: "#39ff1066", fontSize: 11 }}>(sites &lt;1% concentrated here)</span></div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 3 }}>
