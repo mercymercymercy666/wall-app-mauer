@@ -311,19 +311,22 @@ function generateBrickWall(wall, victims, palette, seed, brickColorMode = "rando
   }
   while (stripeRows.length < numRows) stripeRows.push(sitesSorted[sitesSorted.length - 1][0]);
 
-  // ── Clustered: Voronoi blobs with random centers (~1 per 2m) ──
-  // Organic, irregular shapes instead of rectangular grid cells.
-  // Distance uses 2000mm X-scale × 4-row Y-scale so blobs look natural.
-  const VC_SCALE_X = 2000, VC_SCALE_Y = 4;
-  const numVCenters = Math.max(6, Math.round(wallWmm / 2000));
+  // ── Clustered: 2D Voronoi blobs — grid of centers (3 rows × ~1 per 1.5m) with jitter ──
+  // 3 vertical levels ensures patches span the full wall height, not just horizontal streaks.
+  // Scale parameters make each blob roughly 1.5m wide × 7 rows (≈540mm) tall.
+  const numVCols = Math.max(4, Math.ceil(wallWmm / 1500));
+  const numVRows = 3;
+  const VC_SCALE_X = wallWmm / numVCols;        // ~1500mm per normalized unit
+  const VC_SCALE_Y = numRows / numVRows;         // ~7 rows per normalized unit
   const vcX = [], vcY = [], vcSite = [];
-  for (let i = 0; i < numVCenters; i++) {
-    // Spread centers across wall width with jitter, random height
-    const cx = (i + 0.3 + rng() * 0.6) * (wallWmm / numVCenters);
-    const cy = rng() * numRows;
-    const inZone = inSmallZone(cx);
-    const weights = inZone ? boostedWeights : majorOrAll;
-    vcX.push(cx); vcY.push(cy); vcSite.push(weightedPick(rng, weights));
+  for (let vr = 0; vr < numVRows; vr++) {
+    for (let vc = 0; vc < numVCols; vc++) {
+      const cx = (vc + 0.15 + rng() * 0.75) * (wallWmm / numVCols);
+      const cy = (vr + 0.15 + rng() * 0.75) * (numRows  / numVRows);
+      const inZone = inSmallZone(cx);
+      const weights = inZone ? boostedWeights : majorOrAll;
+      vcX.push(cx); vcY.push(cy); vcSite.push(weightedPick(rng, weights));
+    }
   }
 
   const blend = clamp(Number(brickBlend) || 0, 0, 1);
