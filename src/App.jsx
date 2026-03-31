@@ -2030,6 +2030,36 @@ ${pages.map((pg, i) => makeOverflowPage(pg, i + 1, pages.length)).join("\n")}
     }
   }
 
+  function saveSession() {
+    const session = {
+      version: 1,
+      params: p,
+      colorOverrides: [...colorOverrides.entries()],
+    };
+    const blob = new Blob([JSON.stringify(session, null, 2)], { type: "application/json" });
+    triggerDownload(blob, "wall_session.json");
+  }
+
+  function loadSession() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,application/json";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const session = JSON.parse(text);
+        if (session.params) setP({ ...DEFAULTS, ...session.params });
+        if (Array.isArray(session.colorOverrides))
+          setColorOverrides(new Map(session.colorOverrides));
+      } catch {
+        alert("Could not read session file.");
+      }
+    };
+    input.click();
+  }
+
   function printA4Test() {
     const tagW = Number(p.tagWmm) || 60;
     const tagH = Number(p.tagHmm) || 120;
@@ -2698,6 +2728,14 @@ document.addEventListener('fullscreenchange', function(){
             }} disabled={!backWallSvg && !frontWallSvg && !axoSvg && !constructionSvg} style={{ padding: "8px 0" }}>
               Print drawings (vector quality)
             </button>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={saveSession} style={{ flex: 1, padding: "6px 0", fontSize: 12 }}>
+                Save session JSON
+              </button>
+              <button onClick={loadSession} style={{ flex: 1, padding: "6px 0", fontSize: 12 }}>
+                Load session JSON
+              </button>
+            </div>
             <button onClick={downloadZip} disabled={!victims.length || zipBusy} style={{ padding: "8px 0" }}>
               {zipBusy ? "Generating ZIP…" : "Download ZIP (CSV + SVG + 1:100 SVG + 1:1 DXF)"}
             </button>
