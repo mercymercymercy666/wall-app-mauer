@@ -2180,8 +2180,7 @@ body{background:#ccc;font-family:monospace;font-size:0}
 .ws{margin-bottom:5mm}
 .pt{font-size:8pt;font-weight:bold;letter-spacing:.06em;border-bottom:.4mm solid #222;padding-bottom:1.5mm;margin-bottom:1mm}
 .pm{font-size:5.5pt;color:#666;margin-bottom:2mm}
-/* dark backing so mortar gaps read as lines, matching the on-screen view */
-.ww{background:#1a1510;display:block}
+.ww{background:white;display:block}
 .ww svg{width:100%;height:auto;display:block}
 /* non-scaling stroke adds a 0.7px border to every brick rect at any print scale */
 .ww svg rect{stroke:rgba(20,12,4,0.55);stroke-width:.35px;vector-effect:non-scaling-stroke;paint-order:fill stroke}
