@@ -2133,102 +2133,143 @@ ${pages.map(pg => makePage(pg.tags, pg.title + " — print test")).join("\n")}
     win.document.close();
   }
 
-  function printWallsSummary() {
-    if (!backBricks || !frontBricks) return;
+  async function printWallsSummary() {
+    if (!backBricks || !frontBricks || pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      // ── helpers ────────────────────────────────────────────────────
+      function computeSections(brickGrid) {
+        const { wallWmm, bricks } = brickGrid;
+        return Array.from({ length: Math.ceil(wallWmm / 5000) }, (_, s) => {
+          const x0 = s * 5000, x1 = Math.min((s + 1) * 5000, wallWmm);
+          const byW = new Map(); let total = 0;
+          for (const b of bricks) {
+            const lo = Math.max(b.xMm, x0), hi = Math.min(b.xMm + b.wMm, x1);
+            if (hi > lo) { byW.set(b.site, (byW.get(b.site) || 0) + (hi - lo)); total += hi - lo; }
+          }
+          const sites = [...byW.entries()].sort((a, b) => b[1] - a[1])
+            .map(([site, w]) => ({ site, pct: total > 0 ? w / total * 100 : 0, color: sitePalette.get(site) || "#888" }));
+          return { label: `${s * 5}–${(x1 / 1000).toFixed(1)}m`, x0mm: s * 5000, x1mm: x1, sites };
+        });
+      }
 
-    // Compute per-5m section site breakdown from a brick grid
-    function computeSections(brickGrid) {
-      const { wallWmm, bricks } = brickGrid;
-      const nSec = Math.ceil(wallWmm / 5000);
-      return Array.from({ length: nSec }, (_, s) => {
-        const x0 = s * 5000, x1 = Math.min((s + 1) * 5000, wallWmm);
-        const byW = new Map();
-        let total = 0;
-        for (const b of bricks) {
-          const lo = Math.max(b.xMm, x0), hi = Math.min(b.xMm + b.wMm, x1);
-          if (hi > lo) { byW.set(b.site, (byW.get(b.site) || 0) + (hi - lo)); total += hi - lo; }
+      // Build composite SVG: title bar + wall SVG + section table + legend
+      function compositePageSvg(title, meta, wallSvgStr, sections, wallWmm) {
+        const svgW = +(wallSvgStr.match(/\bwidth="([\d.]+)"/) ?? [, 800])[1];
+        const svgH = +(wallSvgStr.match(/\bheight="([\d.]+)"/) ?? [, 400])[1];
+
+        // Section table: each column starts at x = s*5000*S, width = sectionWmm*S
+        const ROW_H = 8, LABEL_H = 10, GAP = 3;
+        const maxSites = Math.max(...sections.map(s => s.sites.length));
+        const tableH = LABEL_H + maxSites * ROW_H + GAP;
+
+        let tableSvg = `<rect x="0" y="0" width="${svgW}" height="${tableH}" fill="#f5f5f2"/>`;
+        tableSvg += `<line x1="0" y1="0" x2="${svgW}" y2="0" stroke="#bbb" stroke-width="0.5"/>`;
+        for (const sec of sections) {
+          const cx0 = sec.x0mm * PREVIEW_SCALE;
+          tableSvg += `<line x1="${cx0}" y1="0" x2="${cx0}" y2="${tableH}" stroke="#ccc" stroke-width="0.4"/>`;
+          tableSvg += `<text x="${(cx0 + 2).toFixed(1)}" y="${LABEL_H - 2}" font-family="monospace" font-size="6" font-weight="bold" fill="#444">${sec.label}</text>`;
+          let ry = LABEL_H + 1;
+          for (const { site, pct, color } of sec.sites) {
+            tableSvg += `<rect x="${(cx0 + 2).toFixed(1)}" y="${ry}" width="7" height="5.5" fill="${color}" stroke="rgba(0,0,0,.18)" stroke-width="0.3"/>`;
+            const label = `${site.split(/[\s/]/)[0]} ${pct.toFixed(0)}%`;
+            tableSvg += `<text x="${(cx0 + 11).toFixed(1)}" y="${(ry + 4.5).toFixed(1)}" font-family="monospace" font-size="5" fill="#222">${label}</text>`;
+            ry += ROW_H;
+          }
         }
-        const sites = [...byW.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .map(([site, w]) => ({ site, pct: total > 0 ? w / total * 100 : 0, color: sitePalette.get(site) || "#888" }));
-        return { label: `${s * 5}–${(x1 / 1000).toFixed(1)}m`, widthFrac: (x1 - x0) / wallWmm, sites };
-      });
+
+        // Legend strip
+        const SWATCH = 8, LEG_PAD = 4, LEG_H = SWATCH + LEG_PAD * 2;
+        let legX = LEG_PAD;
+        let legSvg = `<rect x="0" y="0" width="${svgW}" height="${LEG_H}" fill="#ebebeb"/>`;
+        legSvg += `<line x1="0" y1="0" x2="${svgW}" y2="0" stroke="#bbb" stroke-width="0.5"/>`;
+        for (const [site, color] of sitePalette.entries()) {
+          legSvg += `<rect x="${legX}" y="${LEG_PAD}" width="${SWATCH}" height="${SWATCH}" fill="${color}" stroke="rgba(0,0,0,.2)" stroke-width="0.3"/>`;
+          legSvg += `<text x="${legX + SWATCH + 3}" y="${LEG_PAD + SWATCH - 1}" font-family="monospace" font-size="5.5" fill="#333">${site}</text>`;
+          legX += SWATCH + site.length * 3.5 + 12;
+        }
+
+        // Title bar
+        const TITLE_H = 16;
+        const titleSvg = `<rect x="0" y="0" width="${svgW}" height="${TITLE_H}" fill="#fff"/>
+          <text x="2" y="10" font-family="monospace" font-size="8" font-weight="bold" fill="#111">${title}</text>
+          <text x="2" y="${TITLE_H - 2}" font-family="monospace" font-size="5" fill="#666">${meta}</text>
+          <line x1="0" y1="${TITLE_H}" x2="${svgW}" y2="${TITLE_H}" stroke="#ccc" stroke-width="0.5"/>`;
+
+        const innerWall = wallSvgStr.replace(/<\?xml[^?]*\?>/g, '').replace(/^<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '');
+        const totalH = TITLE_H + 2 + svgH + 2 + tableH + LEG_H;
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${totalH}" viewBox="0 0 ${svgW} ${totalH}">
+  <rect width="${svgW}" height="${totalH}" fill="white"/>
+  <g>${titleSvg}</g>
+  <g transform="translate(0,${TITLE_H + 2})">${innerWall}</g>
+  <g transform="translate(0,${TITLE_H + 2 + svgH + 2})">${tableSvg}</g>
+  <g transform="translate(0,${TITLE_H + 2 + svgH + 2 + tableH})">${legSvg}</g>
+</svg>`;
+      }
+
+      // Axonometric page: just title + axo SVG + legend
+      function axoPageSvg() {
+        const svgW = +(axoSvg.match(/\bwidth="([\d.]+)"/) ?? [, 800])[1];
+        const svgH = +(axoSvg.match(/\bheight="([\d.]+)"/) ?? [, 400])[1];
+        const TITLE_H = 16, LEG_H = 16, LEG_PAD = 4, SWATCH = 8;
+        const titleSvg = `<rect x="0" y="0" width="${svgW}" height="${TITLE_H}" fill="#fff"/>
+          <text x="2" y="10" font-family="monospace" font-size="8" font-weight="bold" fill="#111">AXONOMETRIC VIEW — FRONT WALL</text>
+          <text x="2" y="${TITLE_H - 2}" font-family="monospace" font-size="5" fill="#666">${p.frontLengthM} m × ${p.frontHeightM} m · max protrusion ${p.axoProtrusion} mm · colour clusters protrude as units</text>
+          <line x1="0" y1="${TITLE_H}" x2="${svgW}" y2="${TITLE_H}" stroke="#ccc" stroke-width="0.5"/>`;
+        let legX = LEG_PAD;
+        let legSvg = `<rect x="0" y="0" width="${svgW}" height="${LEG_H}" fill="#ebebeb"/>`;
+        for (const [site, color] of sitePalette.entries()) {
+          legSvg += `<rect x="${legX}" y="${LEG_PAD}" width="${SWATCH}" height="${SWATCH}" fill="${color}" stroke="rgba(0,0,0,.2)" stroke-width="0.3"/>`;
+          legSvg += `<text x="${legX + SWATCH + 3}" y="${LEG_PAD + SWATCH - 1}" font-family="monospace" font-size="5.5" fill="#333">${site}</text>`;
+          legX += SWATCH + site.length * 3.5 + 12;
+        }
+        const innerAxo = axoSvg.replace(/<\?xml[^?]*\?>/g, '').replace(/^<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '');
+        const totalH = TITLE_H + 2 + svgH + LEG_H;
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${totalH}" viewBox="0 0 ${svgW} ${totalH}">
+  <rect width="${svgW}" height="${totalH}" fill="white"/>
+  <g>${titleSvg}</g>
+  <g transform="translate(0,${TITLE_H + 2})">${innerAxo}</g>
+  <g transform="translate(0,${TITLE_H + 2 + svgH})">${legSvg}</g>
+</svg>`;
+      }
+
+      // ── build pages & render ────────────────────────────────────────
+      const backSecs  = computeSections(backBricks);
+      const frontSecs = computeSections(frontBricks);
+      const pages = [
+        compositePageSvg(
+          "BACK WALL — MATERIAL DISTRIBUTION PER 5m SECTION",
+          `${p.backLengthM} m × ${p.backHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${backBricks.bricks.length} bricks`,
+          backWallSvg, backSecs, backBricks.wallWmm),
+        compositePageSvg(
+          "FRONT WALL — MATERIAL DISTRIBUTION PER 5m SECTION",
+          `${p.frontLengthM} m × ${p.frontHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${frontBricks.bricks.length} bricks`,
+          frontWallSvg, frontSecs, frontBricks.wallWmm),
+        axoPageSvg(),
+      ];
+
+      const RENDER_W = 6000; // px — gives good quality at A3 scale
+      const pdf = new jsPDF({ orientation: 'l', unit: 'mm', format: 'a3' });
+      const PG_W = 420, PG_H = 297, MARGIN = 8;
+
+      for (let i = 0; i < pages.length; i++) {
+        if (i > 0) pdf.addPage([PG_W, PG_H], 'l');
+        const svgStr = pages[i];
+        const w = +(svgStr.match(/\bwidth="([\d.]+)"/) ?? [, 800])[1];
+        const h = +(svgStr.match(/\bheight="([\d.]+)"/) ?? [, 400])[1];
+        const renderH = Math.round(RENDER_W * h / w);
+        const canvas  = await renderSvgToCanvas(svgStr, RENDER_W, renderH, 'white');
+        const imgW = PG_W - 2 * MARGIN;
+        const imgH = imgW * h / w;
+        const yOff = MARGIN + Math.max(0, (PG_H - 2 * MARGIN - imgH) / 2);
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.93), 'JPEG', MARGIN, yOff, imgW, imgH);
+      }
+      pdf.save("wall_summary.pdf");
+    } finally {
+      setPdfBusy(false);
     }
-
-    function sectionTableHtml(sections, wallWmm) {
-      const annFrac = 80 / (wallWmm * PREVIEW_SCALE + 80); // annotation strip fraction of total SVG width
-      const gridCols = sections.map(s => `${(s.widthFrac * (1 - annFrac) * 100).toFixed(3)}fr`).join(' ') + ` ${(annFrac * 100).toFixed(3)}fr`;
-      const cols = sections.map(s => {
-        const rows = s.sites.map(({ site, pct, color }) =>
-          `<div class="ss"><div class="sw" style="background:${color}"></div><span>${site.split(' ')[0]} <b>${pct.toFixed(0)}%</b></span></div>`
-        ).join('');
-        return `<div class="sc"><div class="sl">${s.label}</div>${rows}</div>`;
-      }).join('') + `<div class="sc"></div>`;
-      return `<div class="sg" style="grid-template-columns:${gridCols}">${cols}</div>`;
-    }
-
-    function wallBlock(title, meta, svgStr, sections, wallWmm) {
-      const svg = svgStr.replace(/<\?xml[^?]*\?>/, '');
-      const legendHtml = [...sitePalette.entries()].map(([site, color]) =>
-        `<div class="li"><div class="sw" style="background:${color}"></div><span>${site}</span></div>`
-      ).join('');
-      return `<div class="page">
-        <div class="pt">${title}</div>
-        <div class="pm">${meta}</div>
-        <div class="ww">${svg}</div>
-        ${sectionTableHtml(sections, wallWmm)}
-        <div class="leg">${legendHtml}</div>
-      </div>`;
-    }
-
-    const backSecs  = computeSections(backBricks);
-    const frontSecs = computeSections(frontBricks);
-    const axoClean  = axoSvg.replace(/<\?xml[^?]*\?>/, '');
-    const legHtml   = [...sitePalette.entries()].map(([site, color]) =>
-      `<div class="li"><div class="sw" style="background:${color}"></div><span>${site}</span></div>`
-    ).join('');
-
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Wall Summary</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#ccc;font-family:monospace;font-size:0}
-.page{background:white;padding:10mm;margin:5mm auto;page-break-after:always;width:400mm}
-.pt{font-size:9pt;font-weight:bold;letter-spacing:.06em;border-bottom:.4mm solid #222;padding-bottom:2mm;margin-bottom:1.5mm}
-.pm{font-size:6.5pt;color:#666;margin-bottom:3mm}
-.ww svg{width:100%;height:auto;display:block}
-.sg{display:grid;border:.3mm solid #bbb;margin-top:2mm}
-.sc{border-right:.3mm solid #bbb;padding:1.5mm 1mm;font-size:0}
-.sc:last-child{border-right:none}
-.sl{font-size:5.5pt;font-weight:bold;color:#333;display:block;margin-bottom:1.5mm}
-.ss{display:flex;align-items:center;gap:1mm;font-size:5pt;line-height:1.5;white-space:nowrap;overflow:hidden}
-.sw{width:3.5mm;height:2.5mm;flex-shrink:0;border:.15mm solid rgba(0,0,0,.25);display:inline-block}
-.leg{display:flex;flex-wrap:wrap;gap:3mm 6mm;margin-top:4mm;padding-top:2mm;border-top:.3mm solid #ddd}
-.li{display:flex;align-items:center;gap:1.5mm;font-size:6pt}
-@media print{
-  body{background:white}
-  .page{margin:0;box-shadow:none}
-  @page{size:A3 landscape;margin:0}
-}
-</style></head><body>
-${wallBlock("BACK WALL — MATERIAL DISTRIBUTION PER 5m SECTION",
-  `${p.backLengthM} m × ${p.backHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${backBricks.bricks.length} bricks`,
-  backWallSvg, backSecs, backBricks.wallWmm)}
-${wallBlock("FRONT WALL — MATERIAL DISTRIBUTION PER 5m SECTION",
-  `${p.frontLengthM} m × ${p.frontHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${frontBricks.bricks.length} bricks`,
-  frontWallSvg, frontSecs, frontBricks.wallWmm)}
-<div class="page" style="page-break-after:avoid">
-  <div class="pt">AXONOMETRIC VIEW — FRONT WALL</div>
-  <div class="pm">${p.frontLengthM} m × ${p.frontHeightM} m · max protrusion ${p.axoProtrusion} mm · colour clusters protrude as units</div>
-  <div class="ww">${axoClean}</div>
-  <div class="leg">${legHtml}</div>
-</div>
-</body></html>`;
-
-    const win = window.open("", "_blank", "width=1100,height=900,resizable=yes,scrollbars=yes");
-    if (!win) { alert("Popup blocked — please allow popups for this page."); return; }
-    win.document.open(); win.document.write(html); win.document.close();
-    win.focus();
-    setTimeout(() => win.print(), 900);
   }
 
   function openPreviewWindow() {
@@ -2852,8 +2893,8 @@ document.addEventListener('fullscreenchange', function(){
             <button onClick={downloadDxf} style={{ padding: "6px 0", fontSize: 12 }}>
               Download 1:1 DXF only (open in AutoCAD / Rhino → save as .dwg)
             </button>
-            <button onClick={printWallsSummary} disabled={!backBricks || !frontBricks} style={{ padding: "8px 0", background: "#39ff1415", border: "1px solid #39ff14", color: "#39ff14", fontWeight: "bold" }}>
-              Print walls summary PDF (3 pages + material % per 5m) ↗
+            <button onClick={printWallsSummary} disabled={!backBricks || !frontBricks || pdfBusy} style={{ padding: "8px 0", background: "#39ff1415", border: "1px solid #39ff14", color: "#39ff14", fontWeight: "bold" }}>
+              {pdfBusy ? "Generating…" : "Download walls summary PDF (3 pages + material % per 5m)"}
             </button>
             <button onClick={openPreviewWindow} disabled={!backBricks} style={{ padding: "8px 0", background: "#39ff1415", border: "1px solid #39ff14", color: "#39ff14", fontWeight: "bold" }}>
               Open 1:1 wall preview ↗
