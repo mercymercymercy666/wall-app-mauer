@@ -2133,6 +2133,104 @@ ${pages.map(pg => makePage(pg.tags, pg.title + " — print test")).join("\n")}
     win.document.close();
   }
 
+  function printWallsSummary() {
+    if (!backBricks || !frontBricks) return;
+
+    // Compute per-5m section site breakdown from a brick grid
+    function computeSections(brickGrid) {
+      const { wallWmm, bricks } = brickGrid;
+      const nSec = Math.ceil(wallWmm / 5000);
+      return Array.from({ length: nSec }, (_, s) => {
+        const x0 = s * 5000, x1 = Math.min((s + 1) * 5000, wallWmm);
+        const byW = new Map();
+        let total = 0;
+        for (const b of bricks) {
+          const lo = Math.max(b.xMm, x0), hi = Math.min(b.xMm + b.wMm, x1);
+          if (hi > lo) { byW.set(b.site, (byW.get(b.site) || 0) + (hi - lo)); total += hi - lo; }
+        }
+        const sites = [...byW.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map(([site, w]) => ({ site, pct: total > 0 ? w / total * 100 : 0, color: sitePalette.get(site) || "#888" }));
+        return { label: `${s * 5}–${(x1 / 1000).toFixed(1)}m`, widthFrac: (x1 - x0) / wallWmm, sites };
+      });
+    }
+
+    function sectionTableHtml(sections, wallWmm) {
+      const annFrac = 80 / (wallWmm * PREVIEW_SCALE + 80); // annotation strip fraction of total SVG width
+      const gridCols = sections.map(s => `${(s.widthFrac * (1 - annFrac) * 100).toFixed(3)}fr`).join(' ') + ` ${(annFrac * 100).toFixed(3)}fr`;
+      const cols = sections.map(s => {
+        const rows = s.sites.map(({ site, pct, color }) =>
+          `<div class="ss"><div class="sw" style="background:${color}"></div><span>${site.split(' ')[0]} <b>${pct.toFixed(0)}%</b></span></div>`
+        ).join('');
+        return `<div class="sc"><div class="sl">${s.label}</div>${rows}</div>`;
+      }).join('') + `<div class="sc"></div>`;
+      return `<div class="sg" style="grid-template-columns:${gridCols}">${cols}</div>`;
+    }
+
+    function wallBlock(title, meta, svgStr, sections, wallWmm) {
+      const svg = svgStr.replace(/<\?xml[^?]*\?>/, '');
+      const legendHtml = [...sitePalette.entries()].map(([site, color]) =>
+        `<div class="li"><div class="sw" style="background:${color}"></div><span>${site}</span></div>`
+      ).join('');
+      return `<div class="page">
+        <div class="pt">${title}</div>
+        <div class="pm">${meta}</div>
+        <div class="ww">${svg}</div>
+        ${sectionTableHtml(sections, wallWmm)}
+        <div class="leg">${legendHtml}</div>
+      </div>`;
+    }
+
+    const backSecs  = computeSections(backBricks);
+    const frontSecs = computeSections(frontBricks);
+    const axoClean  = axoSvg.replace(/<\?xml[^?]*\?>/, '');
+    const legHtml   = [...sitePalette.entries()].map(([site, color]) =>
+      `<div class="li"><div class="sw" style="background:${color}"></div><span>${site}</span></div>`
+    ).join('');
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Wall Summary</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#ccc;font-family:monospace;font-size:0}
+.page{background:white;padding:10mm;margin:5mm auto;page-break-after:always;width:400mm}
+.pt{font-size:9pt;font-weight:bold;letter-spacing:.06em;border-bottom:.4mm solid #222;padding-bottom:2mm;margin-bottom:1.5mm}
+.pm{font-size:6.5pt;color:#666;margin-bottom:3mm}
+.ww svg{width:100%;height:auto;display:block}
+.sg{display:grid;border:.3mm solid #bbb;margin-top:2mm}
+.sc{border-right:.3mm solid #bbb;padding:1.5mm 1mm;font-size:0}
+.sc:last-child{border-right:none}
+.sl{font-size:5.5pt;font-weight:bold;color:#333;display:block;margin-bottom:1.5mm}
+.ss{display:flex;align-items:center;gap:1mm;font-size:5pt;line-height:1.5;white-space:nowrap;overflow:hidden}
+.sw{width:3.5mm;height:2.5mm;flex-shrink:0;border:.15mm solid rgba(0,0,0,.25);display:inline-block}
+.leg{display:flex;flex-wrap:wrap;gap:3mm 6mm;margin-top:4mm;padding-top:2mm;border-top:.3mm solid #ddd}
+.li{display:flex;align-items:center;gap:1.5mm;font-size:6pt}
+@media print{
+  body{background:white}
+  .page{margin:0;box-shadow:none}
+  @page{size:A3 landscape;margin:0}
+}
+</style></head><body>
+${wallBlock("BACK WALL — MATERIAL DISTRIBUTION PER 5m SECTION",
+  `${p.backLengthM} m × ${p.backHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${backBricks.bricks.length} bricks`,
+  backWallSvg, backSecs, backBricks.wallWmm)}
+${wallBlock("FRONT WALL — MATERIAL DISTRIBUTION PER 5m SECTION",
+  `${p.frontLengthM} m × ${p.frontHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${frontBricks.bricks.length} bricks`,
+  frontWallSvg, frontSecs, frontBricks.wallWmm)}
+<div class="page" style="page-break-after:avoid">
+  <div class="pt">AXONOMETRIC VIEW — FRONT WALL</div>
+  <div class="pm">${p.frontLengthM} m × ${p.frontHeightM} m · max protrusion ${p.axoProtrusion} mm · colour clusters protrude as units</div>
+  <div class="ww">${axoClean}</div>
+  <div class="leg">${legHtml}</div>
+</div>
+</body></html>`;
+
+    const win = window.open("", "_blank", "width=1100,height=900,resizable=yes,scrollbars=yes");
+    if (!win) { alert("Popup blocked — please allow popups for this page."); return; }
+    win.document.open(); win.document.write(html); win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 900);
+  }
+
   function openPreviewWindow() {
     const win = window.open("", "wall-preview-1to1", "width=1400,height=800,resizable=yes,scrollbars=yes");
     if (!win) { alert("Popup blocked — please allow popups for this page."); return; }
@@ -2753,6 +2851,9 @@ document.addEventListener('fullscreenchange', function(){
             </button>
             <button onClick={downloadDxf} style={{ padding: "6px 0", fontSize: 12 }}>
               Download 1:1 DXF only (open in AutoCAD / Rhino → save as .dwg)
+            </button>
+            <button onClick={printWallsSummary} disabled={!backBricks || !frontBricks} style={{ padding: "8px 0", background: "#39ff1415", border: "1px solid #39ff14", color: "#39ff14", fontWeight: "bold" }}>
+              Print walls summary PDF (3 pages + material % per 5m) ↗
             </button>
             <button onClick={openPreviewWindow} disabled={!backBricks} style={{ padding: "8px 0", background: "#39ff1415", border: "1px solid #39ff14", color: "#39ff14", fontWeight: "bold" }}>
               Open 1:1 wall preview ↗
