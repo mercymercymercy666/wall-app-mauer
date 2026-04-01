@@ -2163,20 +2163,6 @@ ${pages.map(pg => makePage(pg.tags, pg.title + " — print test")).join("\n")}
       return `<div class="sg" style="grid-template-columns:${gridCols}">${cols}</div>`;
     }
 
-    function wallBlock(title, meta, svgStr, sections, wallWmm) {
-      const svg = svgStr.replace(/<\?xml[^?]*\?>/, '');
-      const legendHtml = [...sitePalette.entries()].map(([site, color]) =>
-        `<div class="li"><div class="sw" style="background:${color}"></div><span>${site}</span></div>`
-      ).join('');
-      return `<div class="page">
-        <div class="pt">${title}</div>
-        <div class="pm">${meta}</div>
-        <div class="ww">${svg}</div>
-        ${sectionTableHtml(sections, wallWmm)}
-        <div class="leg">${legendHtml}</div>
-      </div>`;
-    }
-
     const backSecs  = computeSections(backBricks);
     const frontSecs = computeSections(frontBricks);
     const axoClean  = axoSvg.replace(/<\?xml[^?]*\?>/, '');
@@ -2190,18 +2176,23 @@ ${pages.map(pg => makePage(pg.tags, pg.title + " — print test")).join("\n")}
 body{background:#ccc;font-family:monospace;font-size:0}
 .save-hint{font-size:11pt;background:#1a1a2e;color:#fff;padding:10px 16px;text-align:center;position:sticky;top:0;z-index:99}
 .save-hint b{color:#f0c040}
-.page{background:white;padding:10mm;margin:5mm auto;page-break-after:always;width:400mm}
-.pt{font-size:9pt;font-weight:bold;letter-spacing:.06em;border-bottom:.4mm solid #222;padding-bottom:2mm;margin-bottom:1.5mm}
-.pm{font-size:6.5pt;color:#666;margin-bottom:3mm}
+.page{background:white;padding:8mm;margin:5mm auto;width:400mm}
+.ws{margin-bottom:5mm}
+.pt{font-size:8pt;font-weight:bold;letter-spacing:.06em;border-bottom:.4mm solid #222;padding-bottom:1.5mm;margin-bottom:1mm}
+.pm{font-size:5.5pt;color:#666;margin-bottom:2mm}
+/* dark backing so mortar gaps read as lines, matching the on-screen view */
+.ww{background:#1a1510;display:block}
 .ww svg{width:100%;height:auto;display:block}
-.sg{display:grid;border:.3mm solid #bbb;margin-top:2mm}
-.sc{border-right:.3mm solid #bbb;padding:1.5mm 1mm;font-size:0}
+/* non-scaling stroke adds a 0.7px border to every brick rect at any print scale */
+.ww svg rect{stroke:rgba(20,12,4,0.55);stroke-width:.7px;vector-effect:non-scaling-stroke;paint-order:fill stroke}
+.sg{display:grid;border:.3mm solid #bbb;margin-top:1.5mm}
+.sc{border-right:.3mm solid #bbb;padding:1mm .8mm;font-size:0}
 .sc:last-child{border-right:none}
-.sl{font-size:5.5pt;font-weight:bold;color:#333;display:block;margin-bottom:1.5mm}
-.ss{display:flex;align-items:center;gap:1mm;font-size:5pt;line-height:1.5;white-space:nowrap;overflow:hidden}
-.sw{width:3.5mm;height:2.5mm;flex-shrink:0;border:.15mm solid rgba(0,0,0,.25);display:inline-block}
-.leg{display:flex;flex-wrap:wrap;gap:3mm 6mm;margin-top:4mm;padding-top:2mm;border-top:.3mm solid #ddd}
-.li{display:flex;align-items:center;gap:1.5mm;font-size:6pt}
+.sl{font-size:5pt;font-weight:bold;color:#333;display:block;margin-bottom:1mm}
+.ss{display:flex;align-items:center;gap:.8mm;font-size:4.5pt;line-height:1.4;white-space:nowrap;overflow:hidden}
+.sw{width:3mm;height:2.2mm;flex-shrink:0;border:.15mm solid rgba(0,0,0,.25);display:inline-block}
+.leg{display:flex;flex-wrap:wrap;gap:2mm 5mm;margin-top:3mm;padding-top:2mm;border-top:.3mm solid #ddd}
+.li{display:flex;align-items:center;gap:1.5mm;font-size:5.5pt}
 @media print{
   body{background:white}
   .save-hint{display:none}
@@ -2210,16 +2201,24 @@ body{background:#ccc;font-family:monospace;font-size:0}
 }
 </style></head><body>
 <div class="save-hint">In the print dialog → set <b>Destination</b> to <b>Save as PDF</b> → <b>Save</b></div>
-${wallBlock("BACK WALL — MATERIAL DISTRIBUTION PER 5m SECTION",
-  `${p.backLengthM} m × ${p.backHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${backBricks.bricks.length} bricks`,
-  backWallSvg, backSecs, backBricks.wallWmm)}
-${wallBlock("FRONT WALL — MATERIAL DISTRIBUTION PER 5m SECTION",
-  `${p.frontLengthM} m × ${p.frontHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${frontBricks.bricks.length} bricks`,
-  frontWallSvg, frontSecs, frontBricks.wallWmm)}
-<div class="page" style="page-break-after:avoid">
-  <div class="pt">AXONOMETRIC VIEW — FRONT WALL</div>
-  <div class="pm">${p.frontLengthM} m × ${p.frontHeightM} m · max protrusion ${p.axoProtrusion} mm · colour clusters protrude as units</div>
-  <div class="ww">${axoClean}</div>
+<div class="page">
+  <div class="ws">
+    <div class="pt">BACK WALL — MATERIAL DISTRIBUTION PER 5m SECTION</div>
+    <div class="pm">${p.backLengthM} m × ${p.backHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${backBricks.bricks.length} bricks</div>
+    <div class="ww">${backWallSvg.replace(/<\?xml[^?]*\?>/, '')}</div>
+    ${sectionTableHtml(backSecs, backBricks.wallWmm)}
+  </div>
+  <div class="ws">
+    <div class="pt">FRONT WALL — MATERIAL DISTRIBUTION PER 5m SECTION</div>
+    <div class="pm">${p.frontLengthM} m × ${p.frontHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${frontBricks.bricks.length} bricks</div>
+    <div class="ww">${frontWallSvg.replace(/<\?xml[^?]*\?>/, '')}</div>
+    ${sectionTableHtml(frontSecs, frontBricks.wallWmm)}
+  </div>
+  <div class="ws">
+    <div class="pt">AXONOMETRIC VIEW — FRONT WALL</div>
+    <div class="pm">${p.frontLengthM} m × ${p.frontHeightM} m · max protrusion ${p.axoProtrusion} mm · colour clusters protrude as units</div>
+    <div class="ww">${axoClean}</div>
+  </div>
   <div class="leg">${legHtml}</div>
 </div>
 </body></html>`;
