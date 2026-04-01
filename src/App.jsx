@@ -2184,7 +2184,7 @@ body{background:#ccc;font-family:monospace;font-size:0}
 .ww{background:#1a1510;display:block}
 .ww svg{width:100%;height:auto;display:block}
 /* non-scaling stroke adds a 0.7px border to every brick rect at any print scale */
-.ww svg rect{stroke:rgba(20,12,4,0.55);stroke-width:.7px;vector-effect:non-scaling-stroke;paint-order:fill stroke}
+.ww svg rect{stroke:rgba(20,12,4,0.55);stroke-width:.35px;vector-effect:non-scaling-stroke;paint-order:fill stroke}
 .sg{display:grid;border:.3mm solid #bbb;margin-top:1.5mm}
 .sc{border-right:.3mm solid #bbb;padding:1mm .8mm;font-size:0}
 .sc:last-child{border-right:none}
