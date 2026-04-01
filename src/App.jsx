@@ -696,9 +696,12 @@ function wallAxonometricSvg(brickGrid, bushHammer = "none", protrusionMm = 380, 
   const W  = Math.ceil(fw + dM) + 2;
   const H  = Math.ceil(fh + dM) + 2;
 
-  // Per-brick randomized protrusion (seeded, reproducible)
+  // Per-site protrusion — all bricks of the same site/color protrude equally,
+  // creating cluster-level depth variation instead of per-brick noise.
   const rng  = mulberry32(Number(seed) * 37 + 1234);
-  const prot = bricks.map(() => rng() * protrusionMm);
+  const sites = [...new Set(bricks.map(b => b.site))].sort();
+  const siteProt = new Map(sites.map(s => [s, rng() * protrusionMm]));
+  const prot = bricks.map(b => siteProt.get(b.site) ?? rng() * protrusionMm);
 
   // Compute screen positions:
   //   Back-wall (mortar) plane sits at upper-right: x = dM + bx_mm*S
