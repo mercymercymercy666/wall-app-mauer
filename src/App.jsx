@@ -2170,6 +2170,14 @@ ${pages.map(pg => makePage(pg.tags, pg.title + " — print test")).join("\n")}
       `<div class="li"><div class="sw" style="background:${color}"></div><span>${site}</span></div>`
     ).join('');
 
+    // Bake white mortar strokes into SVG geometry — CSS backgrounds are stripped by PDF renderers.
+    // stroke-width 1.5 SVG units ≈ 0.13mm at A3 scale; paint-order ensures stroke is behind fill.
+    function mortarify(svgStr) {
+      return svgStr
+        .replace(/<\?xml[^?]*\?>/, '')
+        .replace(/<rect /g, '<rect stroke="white" stroke-width="1.5" style="paint-order:stroke fill" ');
+    }
+
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Wall Summary</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -2180,7 +2188,7 @@ body{background:#ccc;font-family:monospace;font-size:0}
 .ws{margin-bottom:5mm}
 .pt{font-size:8pt;font-weight:bold;letter-spacing:.06em;border-bottom:.4mm solid #222;padding-bottom:1.5mm;margin-bottom:1mm}
 .pm{font-size:5.5pt;color:#666;margin-bottom:2mm}
-.ww{background:#0e0e0e;display:block;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.ww{display:block}
 .ww svg{width:100%;height:auto;display:block}
 .sg{display:grid;border:.3mm solid #bbb;margin-top:1.5mm}
 .sc{border-right:.3mm solid #bbb;padding:1mm .8mm;font-size:0}
@@ -2202,13 +2210,13 @@ body{background:#ccc;font-family:monospace;font-size:0}
   <div class="ws">
     <div class="pt">BACK WALL — MATERIAL DISTRIBUTION PER 5m SECTION</div>
     <div class="pm">${p.backLengthM} m × ${p.backHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${backBricks.bricks.length} bricks</div>
-    <div class="ww">${backWallSvg.replace(/<\?xml[^?]*\?>/, '')}</div>
+    <div class="ww">${mortarify(backWallSvg)}</div>
     ${sectionTableHtml(backSecs, backBricks.wallWmm)}
   </div>
   <div class="ws">
     <div class="pt">FRONT WALL — MATERIAL DISTRIBUTION PER 5m SECTION</div>
     <div class="pm">${p.frontLengthM} m × ${p.frontHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${frontBricks.bricks.length} bricks</div>
-    <div class="ww">${frontWallSvg.replace(/<\?xml[^?]*\?>/, '')}</div>
+    <div class="ww">${mortarify(frontWallSvg)}</div>
     ${sectionTableHtml(frontSecs, frontBricks.wallWmm)}
   </div>
   <div class="ws">
