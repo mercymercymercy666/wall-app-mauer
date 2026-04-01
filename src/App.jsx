@@ -47,6 +47,7 @@ const DEFAULTS = {
   minGapMult: 1.0,      // min X gap as multiple of tagW (1 = no overlap)
   railCountOverride: 0, // 0 = auto (3–6 based on band height)
   linearEdges: true,    // true = flush to wall edges, false = ragged/random edge margins
+  showTags: true,           // false = pure brick view (no tags/rails in preview + exports)
   brickColorMode: "random", // "random" | "zoned" | "striped" | "clustered"
   brickBlend: 0.25,         // 0 = pure structure, 1 = fully random bleed (for zoned/striped)
   clusterSpread: 0.45,      // clustered only: 0 = horizontal runs, 1 = natural 2D blobs (vertical carry)
@@ -510,7 +511,7 @@ function bushHammerDiagramSvg(type) {
 /* -----------------------
    SVG previews
 ------------------------ */
-function backWallPreviewSvg(brickGrid, tagLayout, rHeightsMm = [], concreteBaseMm = 0, concreteCapMm = 0) {
+function backWallPreviewSvg(brickGrid, tagLayout, rHeightsMm = [], concreteBaseMm = 0, concreteCapMm = 0, showTags = true) {
   const { wallWmm, wallHmm, bricks } = brickGrid;
   const S       = PREVIEW_SCALE;
   const viewW   = Math.round(wallWmm * S);
@@ -532,26 +533,28 @@ function backWallPreviewSvg(brickGrid, tagLayout, rHeightsMm = [], concreteBaseM
       + `fill="${b.color}"/>`;
   }
 
-  // Rails drawn before tags so they appear behind (tags are semi-transparent)
-  for (let r = 0; r < rHeightsMm.length; r++) {
-    const ry = (capH + brickH - rHeightsMm[r] * S).toFixed(1);
-    svg += `<line x1="0" y1="${ry}" x2="${viewW}" y2="${ry}" stroke="#b0a090" stroke-width="1.2" stroke-opacity="0.85"/>`;
-    svg += `<text x="4" y="${+ry - 1.5}" font-family="monospace" font-size="5" fill="#b0a090cc">R${r+1}</text>`;
-  }
+  if (showTags) {
+    // Rails drawn before tags so they appear behind (tags are semi-transparent)
+    for (let r = 0; r < rHeightsMm.length; r++) {
+      const ry = (capH + brickH - rHeightsMm[r] * S).toFixed(1);
+      svg += `<line x1="0" y1="${ry}" x2="${viewW}" y2="${ry}" stroke="#b0a090" stroke-width="1.2" stroke-opacity="0.85"/>`;
+      svg += `<text x="4" y="${+ry - 1.5}" font-family="monospace" font-size="5" fill="#b0a090cc">R${r+1}</text>`;
+    }
 
-  for (const t of tagLayout) {
-    const x  = t.xMm * S;
-    const y  = capH + (wallHmm - t.yMm - t.hMm) * S;
-    const w  = Math.max(0.5, t.wMm * S);
-    const h  = Math.max(0.5, t.hMm * S);
-    const cx = (x + w / 2).toFixed(2);
-    const cy = (y + h / 2).toFixed(2);
-    const fs = Math.max(1.5, w * 0.42).toFixed(1);
-    svg += `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" `
-      + `fill="rgba(230,235,240,0.65)" stroke="rgba(50,65,75,0.80)" stroke-width="0.3" `
-      + `data-tag-idx="${t.index}" style="cursor:pointer"/>`;
-    svg += `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="middle" `
-      + `font-family="monospace" font-size="${fs}" fill="rgba(5,15,25,0.85)" style="pointer-events:none">${t.index + 1}</text>`;
+    for (const t of tagLayout) {
+      const x  = t.xMm * S;
+      const y  = capH + (wallHmm - t.yMm - t.hMm) * S;
+      const w  = Math.max(0.5, t.wMm * S);
+      const h  = Math.max(0.5, t.hMm * S);
+      const cx = (x + w / 2).toFixed(2);
+      const cy = (y + h / 2).toFixed(2);
+      const fs = Math.max(1.5, w * 0.42).toFixed(1);
+      svg += `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" `
+        + `fill="rgba(230,235,240,0.65)" stroke="rgba(50,65,75,0.80)" stroke-width="0.3" `
+        + `data-tag-idx="${t.index}" style="cursor:pointer"/>`;
+      svg += `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="middle" `
+        + `font-family="monospace" font-size="${fs}" fill="rgba(5,15,25,0.85)" style="pointer-events:none">${t.index + 1}</text>`;
+    }
   }
 
   const nSec = Math.ceil(wallWmm / SECTION_MM);
@@ -1697,7 +1700,7 @@ export default function App() {
     railHeights(Number(p.tagBandMinM) * 1000, Number(p.tagBandMaxM) * 1000, Number(p.tagHmm) || 120, Number(p.railCountOverride) || 0),
   [p.tagBandMinM, p.tagBandMaxM, p.tagHmm, p.railCountOverride]);
 
-  const backWallSvg     = useMemo(() => backBricks  ? backWallPreviewSvg(backBricks, adjustedTagLayout, previewRailHeights, +p.concreteBaseM * 1000, +p.concreteCapM * 1000) : "", [backBricks, adjustedTagLayout, previewRailHeights, p.concreteBaseM, p.concreteCapM]);
+  const backWallSvg     = useMemo(() => backBricks  ? backWallPreviewSvg(backBricks, adjustedTagLayout, previewRailHeights, +p.concreteBaseM * 1000, +p.concreteCapM * 1000, p.showTags) : "", [backBricks, adjustedTagLayout, previewRailHeights, p.concreteBaseM, p.concreteCapM, p.showTags]);
   const frontWallSvg    = useMemo(() => frontBricks ? frontWallPreviewSvg(frontBricks, p.bushHammer, +p.concreteBaseM * 1000, +p.concreteCapM * 1000) : "", [frontBricks, p.bushHammer, p.concreteBaseM, p.concreteCapM]);
   const axoSvg          = useMemo(() => frontBricks ? wallAxonometricSvg(frontBricks, p.bushHammer, Number(p.axoProtrusion) || 380, Number(p.seed) || 1) : "", [frontBricks, p.bushHammer, p.axoProtrusion, p.seed]);
   const constructionSvg = useMemo(() => constructionDrawingSvg(backWall, frontWall, p, adjustedTagLayout, dragOffsets), [backWall, frontWall, p, adjustedTagLayout, dragOffsets]);
@@ -2790,9 +2793,16 @@ document.addEventListener('fullscreenchange', function(){
         <div style={{ border: "1px solid #39ff1440", padding: 12, borderRadius: 4, background: "#050505" }}>
           <h3 style={{ marginTop: 0 }}>Previews</h3>
 
-          <h4>Back wall — bricks + staggered tags ({numRails} rails, {p.tagBandMinM}–{p.tagBandMaxM} m, {tagLayout.length} tags)
-            <span style={{ fontWeight: "normal", fontSize: 12, color: "#39ff1488", marginLeft: 10 }}>hover tag to preview</span>
-          </h4>
+          <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 6 }}>
+            <h4 style={{ margin: 0 }}>Back wall — bricks + staggered tags ({numRails} rails, {p.tagBandMinM}–{p.tagBandMaxM} m, {tagLayout.length} tags)
+              <span style={{ fontWeight: "normal", fontSize: 12, color: "#39ff1488", marginLeft: 10 }}>hover tag to preview</span>
+            </h4>
+            <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, whiteSpace: "nowrap", cursor: "pointer", marginLeft: "auto" }}>
+              <input type="checkbox" checked={p.showTags} onChange={e => setP({...p, showTags: e.target.checked})}
+                style={{ accentColor: "#39ff14" }} />
+              Show tags
+            </label>
+          </div>
           {backBricks
             ? <div
                 style={{ overflow: "auto", border: "1px solid #39ff1430", background: "#000" }}
