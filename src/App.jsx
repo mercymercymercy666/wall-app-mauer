@@ -2180,7 +2180,7 @@ body{background:#ccc;font-family:monospace;font-size:0}
 .ws{margin-bottom:5mm}
 .pt{font-size:8pt;font-weight:bold;letter-spacing:.06em;border-bottom:.4mm solid #222;padding-bottom:1.5mm;margin-bottom:1mm}
 .pm{font-size:5.5pt;color:#666;margin-bottom:2mm}
-.ww{background:#0e0e0e;display:block}
+.ww{background:#0e0e0e;display:block;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .ww svg{width:100%;height:auto;display:block}
 .sg{display:grid;border:.3mm solid #bbb;margin-top:1.5mm}
 .sc{border-right:.3mm solid #bbb;padding:1mm .8mm;font-size:0}
