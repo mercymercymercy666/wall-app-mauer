@@ -2133,106 +2133,129 @@ ${pages.map(pg => makePage(pg.tags, pg.title + " — print test")).join("\n")}
     win.document.close();
   }
 
-  function printWallsSummary() {
-    if (!backBricks || !frontBricks) return;
+  async function printWallsSummary() {
+    if (!backBricks || !frontBricks || pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      // Same raster pipeline as downloadPdf — dark bg renders mortar lines exactly as on screen
+      const QUALITY = 4;
+      const PG_W = 420, M = 8;                        // A3 landscape mm
+      const CW = PG_W - 2 * M;                        // content width mm
 
-    function computeSections(brickGrid) {
-      const { wallWmm, bricks } = brickGrid;
-      return Array.from({ length: Math.ceil(wallWmm / 5000) }, (_, s) => {
-        const x0 = s * 5000, x1 = Math.min((s + 1) * 5000, wallWmm);
-        const byW = new Map(); let total = 0;
-        for (const b of bricks) {
-          const lo = Math.max(b.xMm, x0), hi = Math.min(b.xMm + b.wMm, x1);
-          if (hi > lo) { byW.set(b.site, (byW.get(b.site) || 0) + (hi - lo)); total += hi - lo; }
+      function svgDims(s) {
+        return {
+          w: +(s.match(/\bwidth="([\d.]+)"/)  ?? [,800])[1],
+          h: +(s.match(/\bheight="([\d.]+)"/) ?? [,400])[1],
+        };
+      }
+
+      // Render SVG to canvas image and add to pdf, returns rendered height in mm
+      async function addImg(pdf, svgStr, x, y, wMm) {
+        const { w, h } = svgDims(svgStr);
+        const hMm = wMm * h / w;
+        const px  = Math.round(wMm * QUALITY * (96 / 25.4));
+        const canvas = await renderSvgToCanvas(svgStr, px, Math.round(px * h / w));
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.93), 'JPEG', x, y, wMm, hMm);
+        return hMm;
+      }
+
+      // Per-5m section data
+      function computeSections(brickGrid) {
+        const { wallWmm, bricks } = brickGrid;
+        return Array.from({ length: Math.ceil(wallWmm / 5000) }, (_, s) => {
+          const x0 = s * 5000, x1 = Math.min((s + 1) * 5000, wallWmm);
+          const byW = new Map(); let total = 0;
+          for (const b of bricks) {
+            const lo = Math.max(b.xMm, x0), hi = Math.min(b.xMm + b.wMm, x1);
+            if (hi > lo) { byW.set(b.site, (byW.get(b.site) || 0) + (hi - lo)); total += hi - lo; }
+          }
+          const sites = [...byW.entries()].sort((a, b) => b[1] - a[1])
+            .map(([site, w]) => ({ site, pct: total > 0 ? w / total * 100 : 0, color: sitePalette.get(site) || '#888' }));
+          return { label: `${s * 5}–${(x1 / 1000).toFixed(1)}m`, widthFrac: (x1 - x0) / wallWmm, sites };
+        });
+      }
+
+      // Draw section breakdown table using jsPDF primitives
+      function drawSectionTable(pdf, sections, wallWmm, x, y, w) {
+        const annFrac  = 80 / (wallWmm * PREVIEW_SCALE + 80);
+        const wallFrac = 1 - annFrac;
+        const ROW_H = 3.2, LABEL_H = 4, SW = 2.5, SH = 1.8, PAD = 0.8;
+        const maxRows = Math.max(...sections.map(s => s.sites.length));
+        const tableH  = LABEL_H + maxRows * ROW_H + PAD;
+
+        pdf.setFillColor(245, 245, 242);
+        pdf.rect(x, y, w * wallFrac, tableH, 'F');
+        pdf.setDrawColor(187, 187, 187); pdf.setLineWidth(0.1);
+        pdf.rect(x, y, w * wallFrac, tableH);
+
+        let cx = x;
+        for (const sec of sections) {
+          const cw = sec.widthFrac * wallFrac * w;
+          pdf.setDrawColor(200, 200, 200); pdf.setLineWidth(0.08);
+          pdf.line(cx, y, cx, y + tableH);
+          pdf.setFontSize(4.5); pdf.setFont('courier', 'bold'); pdf.setTextColor(60, 60, 60);
+          pdf.text(sec.label, cx + PAD, y + LABEL_H - 0.8);
+          let ry = y + LABEL_H + 0.5;
+          for (const { site, pct, color } of sec.sites) {
+            const r = parseInt(color.slice(1, 3), 16), g = parseInt(color.slice(3, 5), 16), b = parseInt(color.slice(5, 7), 16);
+            pdf.setFillColor(r, g, b); pdf.rect(cx + PAD, ry, SW, SH, 'F');
+            pdf.setFontSize(3.8); pdf.setFont('courier', 'normal'); pdf.setTextColor(30, 30, 30);
+            pdf.text(`${site.split(/[\s/]/)[0]} ${pct.toFixed(0)}%`, cx + PAD + SW + 0.8, ry + SH - 0.2);
+            ry += ROW_H;
+          }
+          cx += cw;
         }
-        const sites = [...byW.entries()].sort((a, b) => b[1] - a[1])
-          .map(([site, w]) => ({ site, pct: total > 0 ? w / total * 100 : 0, color: sitePalette.get(site) || "#888" }));
-        return { label: `${s * 5}–${(x1 / 1000).toFixed(1)}m`, widthFrac: (x1 - x0) / wallWmm, sites };
-      });
+        return tableH;
+      }
+
+      // Draw legend row
+      function drawLegend(pdf, x, y) {
+        let lx = x;
+        pdf.setFontSize(4.5); pdf.setFont('courier', 'normal');
+        for (const [site, color] of sitePalette.entries()) {
+          const r = parseInt(color.slice(1,3),16), g = parseInt(color.slice(3,5),16), b = parseInt(color.slice(5,7),16);
+          pdf.setFillColor(r, g, b); pdf.rect(lx, y, 3, 2.2, 'F');
+          pdf.setTextColor(30, 30, 30);
+          pdf.text(site, lx + 3.8, y + 2);
+          lx += 3.8 + site.length * 1.6 + 3;
+        }
+      }
+
+      const backSecs  = computeSections(backBricks);
+      const frontSecs = computeSections(frontBricks);
+
+      const pdf = new jsPDF({ orientation: 'l', unit: 'mm', format: 'a3' });
+      let y = M;
+
+      // ── title helper ──
+      function drawTitle(label, meta) {
+        pdf.setFontSize(7); pdf.setFont('courier', 'bold'); pdf.setTextColor(20, 20, 20);
+        pdf.text(label, M, y + 4); y += 5;
+        pdf.setFontSize(5); pdf.setFont('courier', 'normal'); pdf.setTextColor(100, 100, 100);
+        pdf.text(meta, M, y + 2); y += 3.5;
+        pdf.setDrawColor(180,180,180); pdf.setLineWidth(0.1); pdf.line(M, y, M + CW, y); y += 1.5;
+      }
+
+      drawTitle('BACK WALL — MATERIAL DISTRIBUTION PER 5m SECTION',
+        `${p.backLengthM} m × ${p.backHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${backBricks.bricks.length} bricks`);
+      const bwH = await addImg(pdf, backWallSvg, M, y, CW); y += bwH + 1;
+      y += drawSectionTable(pdf, backSecs, backBricks.wallWmm, M, y, CW) + 4;
+
+      drawTitle('FRONT WALL — MATERIAL DISTRIBUTION PER 5m SECTION',
+        `${p.frontLengthM} m × ${p.frontHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${frontBricks.bricks.length} bricks`);
+      const fwH = await addImg(pdf, frontWallSvg, M, y, CW); y += fwH + 1;
+      y += drawSectionTable(pdf, frontSecs, frontBricks.wallWmm, M, y, CW) + 4;
+
+      drawTitle('AXONOMETRIC VIEW — FRONT WALL',
+        `${p.frontLengthM} m × ${p.frontHeightM} m · max protrusion ${p.axoProtrusion} mm`);
+      const axoH = await addImg(pdf, axoSvg, M, y, CW); y += axoH + 3;
+
+      drawLegend(pdf, M, y);
+
+      pdf.save('wall_summary.pdf');
+    } finally {
+      setPdfBusy(false);
     }
-
-    function sectionTableHtml(sections, wallWmm) {
-      const annFrac = 80 / (wallWmm * PREVIEW_SCALE + 80);
-      const gridCols = sections.map(s => `${(s.widthFrac * (1 - annFrac) * 100).toFixed(3)}fr`).join(' ') + ` ${(annFrac * 100).toFixed(3)}fr`;
-      const cols = sections.map(s => {
-        const rows = s.sites.map(({ site, pct, color }) =>
-          `<div class="ss"><div class="sw" style="background:${color}"></div><span>${site.split(/[\s/]/)[0]} <b>${pct.toFixed(0)}%</b></span></div>`
-        ).join('');
-        return `<div class="sc"><div class="sl">${s.label}</div>${rows}</div>`;
-      }).join('') + `<div class="sc"></div>`;
-      return `<div class="sg" style="grid-template-columns:${gridCols}">${cols}</div>`;
-    }
-
-    const backSecs  = computeSections(backBricks);
-    const frontSecs = computeSections(frontBricks);
-    const axoClean  = axoSvg.replace(/<\?xml[^?]*\?>/, '');
-    const legHtml   = [...sitePalette.entries()].map(([site, color]) =>
-      `<div class="li"><div class="sw" style="background:${color}"></div><span>${site}</span></div>`
-    ).join('');
-
-    // Bake white mortar strokes into SVG geometry — CSS backgrounds are stripped by PDF renderers.
-    // stroke-width 1.5 SVG units ≈ 0.13mm at A3 scale; paint-order ensures stroke is behind fill.
-    function mortarify(svgStr) {
-      return svgStr
-        .replace(/<\?xml[^?]*\?>/, '')
-        .replace(/<rect /g, '<rect stroke="white" stroke-width="1.5" style="paint-order:stroke fill" ');
-    }
-
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Wall Summary</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#ccc;font-family:monospace;font-size:0}
-.save-hint{font-size:11pt;background:#1a1a2e;color:#fff;padding:10px 16px;text-align:center;position:sticky;top:0;z-index:99}
-.save-hint b{color:#f0c040}
-.page{background:white;padding:8mm;margin:5mm auto;width:400mm}
-.ws{margin-bottom:5mm}
-.pt{font-size:8pt;font-weight:bold;letter-spacing:.06em;border-bottom:.4mm solid #222;padding-bottom:1.5mm;margin-bottom:1mm}
-.pm{font-size:5.5pt;color:#666;margin-bottom:2mm}
-.ww{display:block}
-.ww svg{width:100%;height:auto;display:block}
-.sg{display:grid;border:.3mm solid #bbb;margin-top:1.5mm}
-.sc{border-right:.3mm solid #bbb;padding:1mm .8mm;font-size:0}
-.sc:last-child{border-right:none}
-.sl{font-size:5pt;font-weight:bold;color:#333;display:block;margin-bottom:1mm}
-.ss{display:flex;align-items:center;gap:.8mm;font-size:4.5pt;line-height:1.4;white-space:nowrap;overflow:hidden}
-.sw{width:3mm;height:2.2mm;flex-shrink:0;border:.15mm solid rgba(0,0,0,.25);display:inline-block}
-.leg{display:flex;flex-wrap:wrap;gap:2mm 5mm;margin-top:3mm;padding-top:2mm;border-top:.3mm solid #ddd}
-.li{display:flex;align-items:center;gap:1.5mm;font-size:5.5pt}
-@media print{
-  body{background:white}
-  .save-hint{display:none}
-  .page{margin:0;box-shadow:none}
-  @page{size:A3 landscape;margin:0}
-}
-</style></head><body>
-<div class="save-hint">In the print dialog → set <b>Destination</b> to <b>Save as PDF</b> → <b>Save</b></div>
-<div class="page">
-  <div class="ws">
-    <div class="pt">BACK WALL — MATERIAL DISTRIBUTION PER 5m SECTION</div>
-    <div class="pm">${p.backLengthM} m × ${p.backHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${backBricks.bricks.length} bricks</div>
-    <div class="ww">${mortarify(backWallSvg)}</div>
-    ${sectionTableHtml(backSecs, backBricks.wallWmm)}
-  </div>
-  <div class="ws">
-    <div class="pt">FRONT WALL — MATERIAL DISTRIBUTION PER 5m SECTION</div>
-    <div class="pm">${p.frontLengthM} m × ${p.frontHeightM} m brick zone · ${p.concreteBaseM} m base + ${p.concreteCapM} m cap · ${frontBricks.bricks.length} bricks</div>
-    <div class="ww">${mortarify(frontWallSvg)}</div>
-    ${sectionTableHtml(frontSecs, frontBricks.wallWmm)}
-  </div>
-  <div class="ws">
-    <div class="pt">AXONOMETRIC VIEW — FRONT WALL</div>
-    <div class="pm">${p.frontLengthM} m × ${p.frontHeightM} m · max protrusion ${p.axoProtrusion} mm · colour clusters protrude as units</div>
-    <div class="ww">${axoClean}</div>
-  </div>
-  <div class="leg">${legHtml}</div>
-</div>
-</body></html>`;
-
-    const win = window.open("", "_blank", "width=1100,height=900,resizable=yes,scrollbars=yes");
-    if (!win) { alert("Popup blocked — please allow popups for this page."); return; }
-    win.document.open(); win.document.write(html); win.document.close();
-    win.focus();
-    setTimeout(() => win.print(), 800);
   }
 
   function openPreviewWindow() {
