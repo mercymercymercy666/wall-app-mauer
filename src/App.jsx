@@ -2258,6 +2258,164 @@ ${pages.map(pg => makePage(pg.tags, pg.title + " — print test")).join("\n")}
     }
   }
 
+  async function downloadTagSectionPdf() {
+    if (!tagLayout.length || pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      const wallMm   = backWall.lengthM * 1000;
+      const wallHmm  = backWall.heightM * 1000;
+      const bandMinMm = Number(p.tagBandMinM) * 1000;
+      const bandMaxMm = Number(p.tagBandMaxM) * 1000;
+      const tagH = Number(p.tagHmm);
+
+      // Derive rails same way as makeTagLayout
+      const railCountOverride = Number(p.railCountOverride) || 0;
+      const rails = railHeights(bandMinMm, bandMaxMm, tagH, railCountOverride);
+
+      // Sections
+      const SEC_MM   = 5000;
+      const numSecs  = Math.ceil(wallMm / SEC_MM);
+
+      // Page setup — A3 portrait per section
+      const PG_W = 297, PG_H = 420, M = 12;
+      const QUALITY = 6;
+
+      // Global numbering — all tags sorted by x across whole wall
+      const globalSorted = [...tagLayout].sort((a, b) => a.xMm - b.xMm);
+      const globalNumOf = new Map(globalSorted.map((t, i) => [t, i + 1]));
+
+      // Build SVG for one 5m section — zoomed to tag band only, numbered tags
+      function sectionSvg(secIdx) {
+        const x0 = secIdx * SEC_MM;
+        const x1 = Math.min((secIdx + 1) * SEC_MM, wallMm);
+        const secWmm = x1 - x0;
+        const tags = tagLayout.filter(t => t.xMm >= x0 && t.xMm < x1);
+
+        // Sort by x, use global numbers
+        const sorted = [...tags].sort((a, b) => a.xMm - b.xMm);
+
+        // Show only tag band zone + small margin
+        const PAD_MM = Number(p.tagHmm) * 0.5;
+        const viewMinY = Math.max(0, bandMinMm - PAD_MM);   // from bottom of brick zone
+        const viewMaxY = Math.min(wallHmm, bandMaxMm + PAD_MM);
+        const viewH_wall = viewMaxY - viewMinY;              // height of visible zone in wall mm
+
+        const drawW = PG_W - 2 * M;
+        const S = drawW / secWmm;                            // horizontal scale
+        const drawH = viewH_wall * S;                        // keep aspect ratio
+
+        let body = '';
+        body += `<rect width="${drawW}" height="${drawH}" fill="#0e0e0e"/>`;
+
+        // Rail lines (within view)
+        for (const rY of rails) {
+          if (rY < viewMinY - 5 || rY > viewMaxY + 5) continue;
+          const svgY = (viewMaxY - rY) * S;
+          body += `<line x1="0" x2="${drawW}" y1="${svgY.toFixed(2)}" y2="${svgY.toFixed(2)}" stroke="#39ff1450" stroke-width="0.6" stroke-dasharray="5,4"/>`;
+          body += `<text x="1.5" y="${(svgY - 0.6).toFixed(2)}" font-family="monospace" font-size="1.5" fill="#39ff1488">RAIL ${(rY/1000).toFixed(2)} m</text>`;
+        }
+
+        // Tag band boundary lines
+        const bandTopSvg = (viewMaxY - bandMaxMm) * S;
+        const bandBotSvg = (viewMaxY - bandMinMm) * S;
+        body += `<line x1="0" x2="${drawW}" y1="${bandTopSvg.toFixed(2)}" y2="${bandTopSvg.toFixed(2)}" stroke="#ffffff20" stroke-width="0.4" stroke-dasharray="2,3"/>`;
+        body += `<line x1="0" x2="${drawW}" y1="${bandBotSvg.toFixed(2)}" y2="${bandBotSvg.toFixed(2)}" stroke="#ffffff20" stroke-width="0.4" stroke-dasharray="2,3"/>`;
+
+        // Tags — number inside, x-position below
+        for (const t of sorted) {
+          const tx = (t.xMm - x0) * S;
+          // yMm = bottom of tag from bottom of brick zone
+          const ty = (viewMaxY - (t.yMm + t.hMm)) * S;
+          const tw = t.wMm * S;
+          const th = t.hMm * S;
+          const n  = globalNumOf.get(t);
+          body += `<rect x="${tx.toFixed(2)}" y="${ty.toFixed(2)}" width="${tw.toFixed(2)}" height="${th.toFixed(2)}" fill="#39ff1425" stroke="#39ff14" stroke-width="0.5"/>`;
+          // Sequential number — sized to fit inside box
+          const fs = Math.min(th * 0.3, tw * 0.55, 4);
+          body += `<text x="${(tx + tw/2).toFixed(2)}" y="${(ty + th/2 + fs*0.35).toFixed(2)}" text-anchor="middle" font-family="monospace" font-size="${fs.toFixed(1)}" font-weight="bold" fill="#39ff14">${n}</text>`;
+          // x-position below tag
+          body += `<text x="${(tx + tw/2).toFixed(2)}" y="${(ty + th + 1.8).toFixed(2)}" text-anchor="middle" font-family="monospace" font-size="1.2" fill="#aaaaaa">${(t.xMm/1000).toFixed(2)}m</text>`;
+        }
+
+        // Border + dimension
+        body += `<rect x="0" y="0" width="${drawW}" height="${drawH}" fill="none" stroke="#39ff1430" stroke-width="0.5"/>`;
+        body += `<text x="${(drawW/2).toFixed(1)}" y="${(drawH + 3).toFixed(2)}" text-anchor="middle" font-family="monospace" font-size="2" fill="#888">${(x0/1000).toFixed(0)} m — ${(x1/1000).toFixed(1)} m  ·  tag band ${(bandMinMm/1000).toFixed(2)}–${(bandMaxMm/1000).toFixed(2)} m</text>`;
+
+        return { svgStr: `<svg xmlns="http://www.w3.org/2000/svg" width="${drawW}" height="${drawH}">${body}</svg>`, drawW, drawH, sorted, x0, x1 };
+      }
+
+      const pdf = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a3' });
+
+      for (let s = 0; s < numSecs; s++) {
+        if (s > 0) pdf.addPage('a3', 'p');
+
+        const { svgStr, drawW, drawH, sorted: tags, x0, x1 } = sectionSvg(s);
+
+        // Title
+        let y = M;
+        pdf.setFontSize(9); pdf.setFont('courier', 'bold'); pdf.setTextColor(20,20,20);
+        pdf.text(`TAG LAYOUT — SECTION ${s+1} / ${numSecs}`, M, y + 5); y += 6;
+        pdf.setFontSize(5.5); pdf.setFont('courier', 'normal'); pdf.setTextColor(80,80,80);
+        pdf.text(`${(x0/1000).toFixed(0)} m – ${(x1/1000).toFixed(1)} m  ·  ${tags.length} tags  ·  ${rails.length} rails  ·  wall ${backWall.lengthM}×${backWall.heightM} m`, M, y + 3); y += 5;
+        pdf.setDrawColor(180,180,180); pdf.setLineWidth(0.1); pdf.line(M, y, PG_W - M, y); y += 2;
+
+        // Elevation raster
+        const px = Math.round(drawW * QUALITY * (96/25.4));
+        const ph = Math.round(drawH * QUALITY * (96/25.4));
+        const canvas = await renderSvgToCanvas(svgStr, px, ph);
+        const elevH = Math.min(drawH, PG_H - y - M - 80); // cap so list fits below
+        const elevW = elevH * drawW / drawH;
+        pdf.addImage(canvas.toDataURL('image/jpeg', 0.93), 'JPEG', M, y, elevW, elevH);
+        y += elevH + 4;
+
+        // Tag list table — numbered to match elevation
+        if (tags.length > 0) {
+          pdf.setDrawColor(200,200,200); pdf.setLineWidth(0.1);
+          pdf.setFillColor(245,245,242);
+          const COLS = 3;
+          const colW = (PG_W - 2*M) / COLS;
+          const ROW_H = 4.5;
+          const rows = Math.ceil(tags.length / COLS);
+          const tableH = rows * ROW_H + 6;
+          pdf.rect(M, y, PG_W - 2*M, tableH, 'FD');
+
+          pdf.setFontSize(4); pdf.setFont('courier', 'bold'); pdf.setTextColor(40,40,40);
+          pdf.text('#  NAME', M + 2, y + 4);
+          pdf.text('POSITION', M + colW * 0.65 + 2, y + 4);
+          pdf.text('#  NAME', M + colW + 2, y + 4);
+          pdf.text('POSITION', M + colW * 1.65 + 2, y + 4);
+          pdf.text('#  NAME', M + colW * 2 + 2, y + 4);
+          pdf.text('POSITION', M + colW * 2.65 + 2, y + 4);
+          pdf.line(M, y + 5.5, PG_W - M, y + 5.5);
+          y += 6;
+
+          tags.forEach((t, i) => {
+            const col = i % COLS;
+            const row = Math.floor(i / COLS);
+            const cx  = M + col * colW + 2;
+            const cy  = y + row * ROW_H + 3;
+            pdf.setFontSize(3.5); pdf.setFont('courier', 'bold'); pdf.setTextColor(30,30,30);
+            const label = `${i+1}  ${t.name.length > 24 ? t.name.slice(0,23) + '…' : t.name}`;
+            pdf.text(label, cx, cy);
+            pdf.setFont('courier', 'normal'); pdf.setTextColor(100,100,100);
+            pdf.text(`x=${(t.xMm/1000).toFixed(2)}m`, cx + colW * 0.65, cy);
+          });
+        } else {
+          pdf.setFontSize(5); pdf.setFont('courier', 'normal'); pdf.setTextColor(120,120,120);
+          pdf.text('No tags in this section.', M, y + 5);
+        }
+
+        // Footer
+        pdf.setFontSize(3.5); pdf.setFont('courier', 'normal'); pdf.setTextColor(160,160,160);
+        pdf.text(`MEMORIAL WALL · TAG LAYOUT CONSTRUCTION DOCUMENT · Section ${s+1} of ${numSecs} · Generated ${new Date().toISOString().slice(0,10)}`, M, PG_H - 5);
+      }
+
+      pdf.save('tag_layout_sections.pdf');
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
   function openPreviewWindow() {
     const win = window.open("", "wall-preview-1to1", "width=1400,height=800,resizable=yes,scrollbars=yes");
     if (!win) { alert("Popup blocked — please allow popups for this page."); return; }
@@ -2881,6 +3039,9 @@ document.addEventListener('fullscreenchange', function(){
             </button>
             <button onClick={printWallsSummary} disabled={!backBricks || !frontBricks} style={{ padding: "8px 0", background: "#39ff1415", border: "1px solid #39ff14", color: "#39ff14", fontWeight: "bold" }}>
               Walls summary PDF (3 pages + material % per 5m) ↗
+            </button>
+            <button onClick={downloadTagSectionPdf} disabled={!tagLayout.length || pdfBusy} style={{ padding: "8px 0", background: "#39ff1415", border: "1px solid #39ff14", color: "#39ff14", fontWeight: "bold" }}>
+              {pdfBusy ? "Generating…" : "Tag layout PDF (per 5m section) ↓"}
             </button>
             <button onClick={openPreviewWindow} disabled={!backBricks} style={{ padding: "8px 0", background: "#39ff1415", border: "1px solid #39ff14", color: "#39ff14", fontWeight: "bold" }}>
               Open 1:1 wall preview ↗
